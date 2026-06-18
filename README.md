@@ -4,6 +4,22 @@ CodexBuddyMac is a macOS menu bar app that displays Codex and Claude Code usage.
 It runs a local Python bridge, polls the providers' usage endpoints, and keeps the
 latest snapshot on the Mac.
 
+<p align="center">
+  <img src="docs/images/codexbuddy-menu.png" width="344" alt="CodexBuddyMac menu bar showing Codex and Claude usage">
+</p>
+
+See both services at a glance without interrupting your workflow. The compact
+menu shows current five-hour and weekly usage, remaining capacity, connection
+status, and one-click refresh controls.
+
+## Highlights
+
+- Codex and Claude Code usage in one menu bar view
+- Five-hour and weekly usage windows
+- Local-only bridge bound to `127.0.0.1`
+- Automatic refresh with offline fallback
+- Optional launch at login
+
 ## Requirements
 
 - macOS 26.5 or later
@@ -12,9 +28,9 @@ latest snapshot on the Mac.
 - Codex CLI signed in for Codex usage
 - Claude Code signed in for Claude usage
 
-## Setup
+## Download And Run
 
-1. Clone this repository.
+1. Download the repository ZIP from GitHub or clone the repository.
 2. Open `CodexBuddyMac/CodexBuddyMac.xcodeproj` in Xcode.
 3. Replace `com.example.CodexBuddyMac` with a bundle identifier registered to
    your Apple Developer account.
