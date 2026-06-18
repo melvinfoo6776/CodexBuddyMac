@@ -1,0 +1,21 @@
+.DS_Store
+DerivedData/
+build/
+Dist/
+Logs/
+*.log
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+
+# Local notes and obsolete pre-Xcode project sources.
+/XCODE_SETUP.md
+/PROJECT_STATUS.md
+/STARTUP_OPTIONS.md
+/App/
+/Widget/
+/Shared/
+/LaunchAgent/
+/SampleData/

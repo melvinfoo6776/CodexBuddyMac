@@ -1,0 +1,33 @@
+{
+  "plan": "Unknown",
+  "updated_at": "1970-01-01T00:00:00+00:00",
+  "codex": {
+    "five_hour": {
+      "used": 0,
+      "limit": 100,
+      "remaining": 100,
+      "reset_at": ""
+    },
+    "weekly": {
+      "used": 0,
+      "limit": 100,
+      "remaining": 100,
+      "reset_at": ""
+    }
+  },
+  "claude": {
+    "five_hour": {
+      "used": 0,
+      "limit": 100,
+      "remaining": 100,
+      "reset_at": ""
+    },
+    "weekly": {
+      "used": 0,
+      "limit": 100,
+      "remaining": 100,
+      "reset_at": ""
+    }
+  },
+  "note": "Bundled fallback. Live usage appears after Codex login is available."
+}
