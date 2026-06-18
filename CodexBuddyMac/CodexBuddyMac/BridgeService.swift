@@ -19,6 +19,8 @@ enum BridgeService {
     ]
 
     private static var process: Process?
+    private static var stdoutHandle: FileHandle?
+    private static var stderrHandle: FileHandle?
     private static var startAttempted = false
 
     static var appSupportURL: URL {
@@ -90,6 +92,7 @@ enum BridgeService {
         }
 
         if process?.isRunning == false {
+            closeLogHandles()
             process = nil
             startAttempted = false
         } else if startAttempted, process == nil {
@@ -118,13 +121,19 @@ enum BridgeService {
             "--claude-file", claudeUsageURL.path,
             "--no-discovery"
         ]
-        bridge.standardOutput = try FileHandle(forWritingTo: stdoutURL)
-        bridge.standardError = try FileHandle(forWritingTo: stderrURL)
+        stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+        stderrHandle = try FileHandle(forWritingTo: stderrURL)
+        bridge.standardOutput = stdoutHandle
+        bridge.standardError = stderrHandle
+        bridge.terminationHandler = { _ in
+            closeLogHandles()
+        }
 
         do {
             try bridge.run()
             process = bridge
         } catch {
+            closeLogHandles()
             startAttempted = false
             throw error
         }
@@ -134,9 +143,17 @@ enum BridgeService {
         if process?.isRunning == true {
             process?.terminate()
         }
+        closeLogHandles()
         process = nil
         startAttempted = false
         try startIfNeeded()
+    }
+
+    private static func closeLogHandles() {
+        try? stdoutHandle?.close()
+        try? stderrHandle?.close()
+        stdoutHandle = nil
+        stderrHandle = nil
     }
 
     static func diagnostics() async -> BridgeDiagnostics {
