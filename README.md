@@ -20,6 +20,10 @@ status, and one-click refresh controls.
 - Automatic refresh with offline fallback
 - Optional launch at login
 
+> [!NOTE]
+> The Settings feature is planned for future development and is not yet fully
+> implemented.
+
 ## Requirements
 
 - macOS 26.5 or later
