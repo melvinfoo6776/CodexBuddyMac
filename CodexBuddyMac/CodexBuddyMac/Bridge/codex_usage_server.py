@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import socket
@@ -27,6 +28,22 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_OAUTH_BETA = "oauth-2025-04-20"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 CLAUDE_CREDENTIALS_FILE = Path("~/.claude/.credentials.json")
+
+# Claude Code OAuth refresh. Access tokens are short-lived (~1h); when expired
+# the usage endpoint returns 401. Claude Code refreshes via this endpoint using
+# the stored refresh token; we do the same so the bridge can self-heal instead
+# of going dark until the user next opens Claude Code. The refreshed credentials
+# are written back to the SAME Keychain item (single source of truth) so Claude
+# Code stays in sync; everything other than the three claudeAiOauth token fields
+# (notably the mcpOAuth blob) is preserved untouched.
+CLAUDE_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Refresh a little before actual expiry so a poll never races the deadline.
+CLAUDE_TOKEN_REFRESH_SKEW_SECONDS = 120.0
+# Don't hammer the token endpoint if refresh keeps failing.
+CLAUDE_REFRESH_BACKOFF_SECONDS = 300.0
+_claude_refresh_lock = threading.Lock()
+_claude_refresh_retry_after: float = 0.0
 
 # The OAuth usage endpoint is sensitive to request rate and will return 429 if
 # polled too often (the ESP, the statusline script, and Claude Code all hit it).
@@ -244,12 +261,8 @@ def load_claude_usage(claude_file: Path) -> dict[str, Any] | None:
     return claude
 
 
-def load_claude_oauth_token() -> str | None:
-    """Resolve the Claude Code OAuth token: env override, macOS Keychain, then file."""
-    token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if token:
-        return token
-
+def _read_keychain_credentials() -> tuple[str, dict[str, Any]] | None:
+    """Return (raw_json, parsed) for the Claude Code Keychain item, or None."""
     try:
         result = subprocess.run(
             ["security", "find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"],
@@ -257,12 +270,203 @@ def load_claude_oauth_token() -> str | None:
             text=True,
             timeout=5,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            token = find_value(json.loads(result.stdout), ("accessToken", "access_token"))
-            if token:
-                return token
-    except (OSError, json.JSONDecodeError, ValueError):
-        pass
+    except OSError:
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    raw = result.stdout.strip()
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return raw, parsed
+
+
+def _keychain_account() -> str | None:
+    """The account (-a) the Keychain item was created with; needed to update it."""
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except OSError:
+        return None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith('"acct"') and '="' in line:
+            return line.split('="', 1)[1].rstrip('"')
+    return None
+
+
+def claude_token_status() -> dict[str, Any]:
+    """Report Claude token validity for the Settings UI (no secrets returned)."""
+    creds = _read_keychain_credentials()
+    if creds is None:
+        return {"present": False, "valid": False, "can_refresh": False,
+                "message": "No Claude credential found in Keychain"}
+    oauth = creds[1].get("claudeAiOauth")
+    if not isinstance(oauth, dict) or not oauth.get("accessToken"):
+        return {"present": False, "valid": False, "can_refresh": False,
+                "message": "No Claude access token in credential"}
+    can_refresh = bool(oauth.get("refreshToken"))
+    expires_at = oauth.get("expiresAt")
+    if isinstance(expires_at, (int, float)):
+        seconds = (expires_at - time.time() * 1000) / 1000
+        valid = seconds > 0
+        return {"present": True, "valid": valid, "can_refresh": can_refresh,
+                "expires_in_seconds": int(seconds),
+                "message": "Valid" if valid else "Expired"}
+    return {"present": True, "valid": True, "can_refresh": can_refresh,
+            "message": "Valid (no expiry recorded)"}
+
+
+def refresh_claude_token() -> dict[str, Any]:
+    """Refresh the Claude access token using the stored refresh token.
+
+    Preserves the entire credential and updates only the three token fields under
+    ``claudeAiOauth``. Backs the original up in memory and restores it if the
+    post-write read-back doesn't verify, so a bad write can't corrupt the shared
+    item (which also holds the mcpOAuth plugin tokens).
+    """
+    global _claude_refresh_retry_after
+
+    with _claude_refresh_lock:
+        now = time.monotonic()
+        if now < _claude_refresh_retry_after:
+            return {"ok": False, "error": "Refresh backing off after a recent failure"}
+
+        creds = _read_keychain_credentials()
+        if creds is None:
+            return {"ok": False, "error": "No Claude credential in Keychain"}
+        raw, data = creds
+        oauth = data.get("claudeAiOauth")
+        if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
+            return {"ok": False, "error": "No refresh token available"}
+        account = _keychain_account()
+        if not account:
+            return {"ok": False, "error": "Could not determine Keychain account"}
+
+        body = json.dumps({
+            "grant_type": "refresh_token",
+            "refresh_token": oauth["refreshToken"],
+            "client_id": CLAUDE_OAUTH_CLIENT_ID,
+        }).encode("utf-8")
+        request = Request(
+            CLAUDE_OAUTH_TOKEN_URL,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json",
+                     "User-Agent": "codex-cli"},
+        )
+        try:
+            with urlopen(request, timeout=15, context=trusted_ssl_context()) as response:
+                token_data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            _claude_refresh_retry_after = now + CLAUDE_REFRESH_BACKOFF_SECONDS
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8")[:200]
+            except OSError:
+                pass
+            return {"ok": False, "error": f"Refresh failed: HTTP {exc.code} {detail}".strip()}
+        except (URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
+            _claude_refresh_retry_after = now + CLAUDE_REFRESH_BACKOFF_SECONDS
+            return {"ok": False, "error": f"Refresh failed: {exc}"}
+
+        new_access = token_data.get("access_token")
+        if not new_access:
+            _claude_refresh_retry_after = now + CLAUDE_REFRESH_BACKOFF_SECONDS
+            return {"ok": False, "error": "Refresh response missing access_token"}
+        new_refresh = token_data.get("refresh_token") or oauth["refreshToken"]
+        expires_in = token_data.get("expires_in")
+
+        updated = copy.deepcopy(data)
+        updated["claudeAiOauth"]["accessToken"] = new_access
+        updated["claudeAiOauth"]["refreshToken"] = new_refresh
+        if isinstance(expires_in, (int, float)):
+            updated["claudeAiOauth"]["expiresAt"] = int(time.time() * 1000 + expires_in * 1000)
+        new_raw = json.dumps(updated)
+
+        write = subprocess.run(
+            ["security", "add-generic-password", "-U", "-a", account,
+             "-s", CLAUDE_KEYCHAIN_SERVICE, "-w", new_raw],
+            capture_output=True, text=True, timeout=10,
+        )
+        if write.returncode != 0:
+            return {"ok": False, "error": f"Keychain write failed: {write.stderr.strip()}"}
+
+        # Verify the write: access token updated and the rest of the structure
+        # (especially the mcpOAuth plugin tokens) is intact. Otherwise restore.
+        check = _read_keychain_credentials()
+        original_mcp = set((data.get("mcpOAuth") or {}).keys())
+        verified = (
+            check is not None
+            and isinstance(check[1].get("claudeAiOauth"), dict)
+            and check[1]["claudeAiOauth"].get("accessToken") == new_access
+            and set((check[1].get("mcpOAuth") or {}).keys()) == original_mcp
+        )
+        if not verified:
+            subprocess.run(
+                ["security", "add-generic-password", "-U", "-a", account,
+                 "-s", CLAUDE_KEYCHAIN_SERVICE, "-w", raw],
+                capture_output=True, text=True, timeout=10,
+            )
+            return {"ok": False, "error": "Write verification failed; restored original credential"}
+
+        _claude_refresh_retry_after = 0.0
+
+    # Clear the usage retry window so the next poll uses the fresh token.
+    with _claude_live_lock:
+        global _claude_live_retry_after
+        _claude_live_retry_after = 0.0
+
+    return {"ok": True, "message": "Claude token refreshed",
+            "expires_in_seconds": int(expires_in) if isinstance(expires_in, (int, float)) else None,
+            "rotated_refresh_token": new_refresh != oauth["refreshToken"]}
+
+
+def load_claude_oauth_token() -> str | None:
+    """Resolve the Claude Code OAuth token: env override, macOS Keychain, then file.
+
+    When the Keychain access token is expired (or about to expire), refresh it in
+    place first so callers never use a dead token. This is the "mandatory check"
+    that keeps live usage from silently going to 401.
+    """
+    token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if token:
+        return token
+
+    creds = _read_keychain_credentials()
+    if creds is not None:
+        oauth = creds[1].get("claudeAiOauth")
+        if isinstance(oauth, dict) and oauth.get("accessToken"):
+            expires_at = oauth.get("expiresAt")
+            expired = (
+                isinstance(expires_at, (int, float))
+                and expires_at <= (time.time() + CLAUDE_TOKEN_REFRESH_SKEW_SECONDS) * 1000
+            )
+            if expired and oauth.get("refreshToken"):
+                result = refresh_claude_token()
+                if result.get("ok"):
+                    refreshed = _read_keychain_credentials()
+                    if refreshed is not None:
+                        new_oauth = refreshed[1].get("claudeAiOauth")
+                        if isinstance(new_oauth, dict) and new_oauth.get("accessToken"):
+                            return new_oauth["accessToken"]
+                # Refresh failed: fall through and try the (possibly stale) token
+                # anyway; the caller handles the resulting 401 with backoff.
+            return oauth["accessToken"]
+
+    # Legacy flat structures / file fallback.
+    creds = creds[1] if creds else None
+    if creds:
+        token = find_value(creds, ("accessToken", "access_token"))
+        if token:
+            return token
 
     try:
         data = json.loads(CLAUDE_CREDENTIALS_FILE.expanduser().read_text(encoding="utf-8"))
@@ -546,6 +750,9 @@ class UsageHandler(BaseHTTPRequestHandler):
     claude: bool
 
     def do_GET(self) -> None:
+        if self.path == "/claude/status":
+            self.write_json(200, claude_token_status())
+            return
         if self.path not in ("/", "/usage.json"):
             self.send_error(404)
             return
@@ -579,6 +786,13 @@ class UsageHandler(BaseHTTPRequestHandler):
         add_display_labels(payload, status_prefix, now)
         payload["served_at"] = now.isoformat()
         self.write_json(200, payload)
+
+    def do_POST(self) -> None:
+        if self.path == "/claude/refresh":
+            result = refresh_claude_token()
+            self.write_json(200 if result.get("ok") else 502, result)
+            return
+        self.send_error(404)
 
     def write_json(self, status: int, payload: dict[str, Any]) -> None:
         try:
@@ -634,6 +848,15 @@ def main() -> None:
     if UsageHandler.claude:
         if UsageHandler.live_claude:
             print(f"Attaching live Claude usage via {CLAUDE_USAGE_URL}, falling back to {UsageHandler.claude_file}")
+            # Mandatory launch check: renew an expired token up front so live
+            # usage works immediately instead of erroring until the first poll.
+            status = claude_token_status()
+            if status.get("present") and not status.get("valid") and status.get("can_refresh"):
+                print("Claude token expired at launch; refreshing...")
+                result = refresh_claude_token()
+                print("Claude token refresh:", result.get("message") or result.get("error"))
+            else:
+                print(f"Claude token status at launch: {status.get('message')}")
         else:
             print(f"Attaching Claude usage from {UsageHandler.claude_file}")
     server.serve_forever()
