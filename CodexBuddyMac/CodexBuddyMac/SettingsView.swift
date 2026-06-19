@@ -12,6 +12,7 @@ struct SettingsView: View {
     @State private var setupMessage: String?
     @State private var loginItemEnabled = LoginItemService.isEnabled
     @State private var isBusy = false
+    @State private var claudeTokenStatus = "Checking…"
 
     var body: some View {
         Form {
@@ -66,6 +67,18 @@ struct SettingsView: View {
                     value: diagnostics?.claudeUsageStatus ?? "Checking",
                     isGood: diagnostics?.claudeUsageStatus == "Updated"
                 )
+
+                DiagnosticRow(
+                    title: "Claude login",
+                    value: claudeTokenStatus,
+                    isGood: claudeTokenStatus.hasPrefix("Valid")
+                )
+
+                Button("Refresh Claude Login") {
+                    Task { await refreshClaudeLogin() }
+                }
+                .disabled(isBusy)
+                .help("Renew the Claude OAuth token if usage shows a 401 / login-expired error.")
             }
 
             Section("Setup") {
@@ -157,6 +170,14 @@ struct SettingsView: View {
     private func refreshDiagnostics() async {
         diagnostics = await BridgeService.diagnostics()
         loginItemEnabled = LoginItemService.isEnabled
+        claudeTokenStatus = await BridgeService.claudeTokenStatus()
+    }
+
+    private func refreshClaudeLogin() async {
+        isBusy = true
+        defer { isBusy = false }
+        setupMessage = await BridgeService.refreshClaudeLogin()
+        await refreshUsage()
     }
 
     private func setLoginItem(_ enabled: Bool) {
