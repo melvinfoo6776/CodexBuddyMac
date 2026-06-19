@@ -32,7 +32,7 @@ CLAUDE_CREDENTIALS_FILE = Path("~/.claude/.credentials.json")
 # polled too often (the ESP, the statusline script, and Claude Code all hit it).
 # Cache the last live result in-process so we call upstream at most once per TTL
 # regardless of how often clients poll, and back off after a failure.
-CLAUDE_LIVE_TTL_SECONDS = 90.0
+CLAUDE_LIVE_TTL_SECONDS = 300.0
 CLAUDE_LIVE_BACKOFF_SECONDS = 300.0
 _claude_live_lock = threading.Lock()
 _claude_live_cache: dict[str, Any] | None = None
@@ -328,6 +328,34 @@ def fetch_claude_usage(token: str) -> dict[str, Any]:
     return claude
 
 
+def _format_backoff_eta(seconds: float) -> str:
+    """Human label for a backoff duration, e.g. '~46m' or '~1h 5m'."""
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        hours, minutes = divmod(seconds // 60, 60)
+        return f"~{hours}h {minutes}m"
+    if seconds >= 60:
+        return f"~{seconds // 60}m"
+    return f"~{seconds}s"
+
+
+def _retry_after_seconds(exc: HTTPError, default: float) -> float:
+    """Parse the Retry-After header (delta-seconds) off a 429/503; else return default.
+
+    The OAuth usage endpoint returns Retry-After as an integer number of seconds
+    (observed ~2775s). We only handle the numeric form; an HTTP-date falls back to
+    the default. Honoring this is what stops the premature retries that otherwise
+    keep re-tripping the rate limit.
+    """
+    raw = exc.headers.get("Retry-After") if exc.headers else None
+    if raw:
+        try:
+            return max(0.0, float(int(str(raw).strip())))
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
 def get_live_claude_usage() -> tuple[dict[str, Any] | None, str | None]:
     """Live Claude usage with an in-process TTL cache and failure backoff.
 
@@ -357,7 +385,8 @@ def get_live_claude_usage() -> tuple[dict[str, Any] | None, str | None]:
             now_dt = datetime.now(timezone.utc)
             for key in ("five_hour", "weekly", "seven_day"):
                 expire_passed_window(stale.get(key), now_dt)
-            stale.setdefault("warning", "Live Claude usage rate-limited; showing last known live values")
+            eta = _format_backoff_eta(_claude_live_retry_after - now)
+            stale["warning"] = f"Live Claude usage rate-limited; showing last known live values (retry in {eta})"
             return stale, None
 
         try:
@@ -366,7 +395,22 @@ def get_live_claude_usage() -> tuple[dict[str, Any] | None, str | None]:
             _claude_live_fetched_at = now
             _claude_live_retry_after = 0.0
             return dict(data), None
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
+        except HTTPError as exc:
+            # Honor the server's Retry-After (the OAuth usage endpoint returns a
+            # long one, e.g. ~46m). Retrying earlier just re-trips the limit.
+            backoff = _retry_after_seconds(exc, CLAUDE_LIVE_BACKOFF_SECONDS)
+            _claude_live_retry_after = now + backoff
+            eta = _format_backoff_eta(backoff)
+            reason = "rate-limited" if exc.code == 429 else f"unavailable (HTTP {exc.code})"
+            if _claude_live_cache is not None:
+                stale = dict(_claude_live_cache)
+                now_dt = datetime.now(timezone.utc)
+                for key in ("five_hour", "weekly", "seven_day"):
+                    expire_passed_window(stale.get(key), now_dt)
+                stale["warning"] = f"Live Claude usage {reason}; showing last known live values (retry in {eta})"
+                return stale, None
+            return None, f"Live Claude usage {reason}; retry in {eta}"
+        except (URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
             _claude_live_retry_after = now + CLAUDE_LIVE_BACKOFF_SECONDS
             if _claude_live_cache is not None:
                 stale = dict(_claude_live_cache)
