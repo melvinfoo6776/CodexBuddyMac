@@ -4,7 +4,7 @@ All notable changes to CodexBuddyMac are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — 2026-06-19
+## [1.1] — 2026-06-19
 
 ### Added
 

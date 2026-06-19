@@ -58,6 +58,13 @@ claude auth login
 
 The app starts its bundled bridge at `http://127.0.0.1:8789/usage.json`.
 
+## Build A Local Release Candidate
+
+Run `./scripts/build-release.sh`. It creates the app, ZIP archive, and SHA-256
+checksum under `Dist/Release`, then verifies the app again after extracting the
+ZIP. The generated app is ad-hoc signed for local testing. Public distribution
+still requires a Developer ID Application certificate and Apple notarization.
+
 ## Settings
 
 Open Settings from the menu to:
