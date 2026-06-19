@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct BridgeDiagnostics {
     let bridgeInstalled: Bool
@@ -19,6 +20,8 @@ enum BridgeService {
     ]
 
     private static var process: Process?
+    private static var stdoutHandle: FileHandle?
+    private static var stderrHandle: FileHandle?
     private static var startAttempted = false
 
     static var appSupportURL: URL {
@@ -57,8 +60,22 @@ enum BridgeService {
             }
 
             let destinationURL = bridgeDirectoryURL.appendingPathComponent(fileName)
-            if fileName == "codex_usage_server.py" || !fileManager.fileExists(atPath: destinationURL.path) {
-                if fileManager.fileExists(atPath: destinationURL.path) {
+            let exists = fileManager.fileExists(atPath: destinationURL.path)
+            // The bundle is the source of truth for the script, but only rewrite
+            // the installed copy when it is missing or actually differs. Copying
+            // unconditionally on every refresh was pointless disk churn and made
+            // it look like fixes "never ran" when only the installed copy was
+            // hand-edited.
+            let needsCopy: Bool
+            if !exists {
+                needsCopy = true
+            } else if fileName == "codex_usage_server.py" {
+                needsCopy = !fileManager.contentsEqual(atPath: bundledURL.path, andPath: destinationURL.path)
+            } else {
+                needsCopy = false
+            }
+            if needsCopy {
+                if exists {
                     try fileManager.removeItem(at: destinationURL)
                 }
                 try fileManager.copyItem(at: bundledURL, to: destinationURL)
@@ -90,6 +107,7 @@ enum BridgeService {
         }
 
         if process?.isRunning == false {
+            closeLogHandles()
             process = nil
             startAttempted = false
         } else if startAttempted, process == nil {
@@ -101,6 +119,12 @@ enum BridgeService {
         }
 
         startAttempted = true
+
+        // macOS does not kill child processes when the parent exits, so a quit
+        // or crash can leave the previous bridge running and holding port 8789.
+        // Reclaim it before binding, otherwise the new process fails with
+        // "Address already in use".
+        reclaimOrphanBridge()
 
         let stdoutURL = logsDirectoryURL.appendingPathComponent("usage-server.log")
         let stderrURL = logsDirectoryURL.appendingPathComponent("usage-server.err.log")
@@ -118,25 +142,106 @@ enum BridgeService {
             "--claude-file", claudeUsageURL.path,
             "--no-discovery"
         ]
-        bridge.standardOutput = try FileHandle(forWritingTo: stdoutURL)
-        bridge.standardError = try FileHandle(forWritingTo: stderrURL)
+        stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+        stderrHandle = try FileHandle(forWritingTo: stderrURL)
+        bridge.standardOutput = stdoutHandle
+        bridge.standardError = stderrHandle
+        bridge.terminationHandler = { _ in
+            closeLogHandles()
+        }
 
         do {
             try bridge.run()
             process = bridge
+            writePidFile(bridge.processIdentifier)
         } catch {
+            closeLogHandles()
             startAttempted = false
             throw error
         }
     }
 
     static func restart() throws {
+        stop()
+        try startIfNeeded()
+    }
+
+    /// Stop the bridge we own and clean up any orphan. Call on app termination
+    /// so the child does not outlive the app and block the next launch.
+    static func stop() {
         if process?.isRunning == true {
             process?.terminate()
+            process?.waitUntilExit()
         }
         process = nil
         startAttempted = false
-        try startIfNeeded()
+        closeLogHandles()
+        reclaimOrphanBridge()
+    }
+
+    private static var pidFileURL: URL {
+        bridgeDirectoryURL.appendingPathComponent("bridge.pid")
+    }
+
+    private static func writePidFile(_ pid: Int32) {
+        try? String(pid).write(to: pidFileURL, atomically: true, encoding: .utf8)
+    }
+
+    private static func readPidFile() -> Int32? {
+        guard let text = try? String(contentsOf: pidFileURL, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 0 else {
+            return nil
+        }
+        return pid
+    }
+
+    private static func removePidFile() {
+        try? FileManager.default.removeItem(at: pidFileURL)
+    }
+
+    /// Terminate a previously-spawned bridge recorded in the pid file. Verifies
+    /// the pid is actually our bridge (guards against pid reuse) before signaling.
+    private static func reclaimOrphanBridge() {
+        defer { removePidFile() }
+        guard let pid = readPidFile(), kill(pid, 0) == 0, processIsOurBridge(pid) else {
+            return
+        }
+        kill(pid, SIGTERM)
+        for _ in 0..<20 {           // wait up to ~1s for it to release the port
+            if kill(pid, 0) != 0 { return }
+            usleep(50_000)
+        }
+        if kill(pid, 0) == 0 {
+            kill(pid, SIGKILL)      // last resort
+        }
+    }
+
+    /// True if `pid` is a live process whose command line is our bridge script,
+    /// so we never signal an unrelated process that happens to reuse the pid.
+    private static func processIsOurBridge(_ pid: Int32) -> Bool {
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/bin/ps")
+        probe.arguments = ["-p", String(pid), "-o", "command="]
+        let pipe = Pipe()
+        probe.standardOutput = pipe
+        probe.standardError = FileHandle.nullDevice
+        do {
+            try probe.run()
+            probe.waitUntilExit()
+        } catch {
+            return false
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let command = String(data: data, encoding: .utf8) ?? ""
+        return command.contains("codex_usage_server.py")
+    }
+
+    private static func closeLogHandles() {
+        try? stdoutHandle?.close()
+        try? stderrHandle?.close()
+        stdoutHandle = nil
+        stderrHandle = nil
     }
 
     static func diagnostics() async -> BridgeDiagnostics {
