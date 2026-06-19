@@ -10,6 +10,12 @@ struct BridgeDiagnostics {
     let logsPath: String
 }
 
+struct ClaudeLoginRefreshResult {
+    let succeeded: Bool
+    let message: String
+    let restartRecommended: Bool
+}
+
 enum BridgeService {
     static let bridgeURL = URL(string: "http://127.0.0.1:8789/usage.json")!
 
@@ -261,24 +267,79 @@ enum BridgeService {
         )
     }
 
-    /// Ask the bridge to refresh the Claude OAuth token. Returns a UI message.
-    static func refreshClaudeLogin() async -> String {
+    /// Ask a healthy bridge to refresh Claude OAuth and report whether restart
+    /// guidance is appropriate. Authentication failures do not imply that the
+    /// bridge itself needs restarting.
+    static func refreshClaudeLogin() async -> ClaudeLoginRefreshResult {
+        do {
+            try startIfNeeded()
+        } catch {
+            return ClaudeLoginRefreshResult(
+                succeeded: false,
+                message: "Bridge could not start: \(error.localizedDescription)",
+                restartRecommended: true
+            )
+        }
+
+        guard await canReachBridge() else {
+            return ClaudeLoginRefreshResult(
+                succeeded: false,
+                message: "Bridge is not responding.",
+                restartRecommended: true
+            )
+        }
+
         guard let url = URL(string: "http://127.0.0.1:8789/claude/refresh") else {
-            return "Invalid bridge URL"
+            return ClaudeLoginRefreshResult(
+                succeeded: false,
+                message: "Invalid bridge URL.",
+                restartRecommended: false
+            )
         }
         var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = "POST"
+        if let token = bridgeAuthToken() {
+            request.setValue(token, forHTTPHeaderField: "X-CodexBuddy-Token")
+        }
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
-                return (obj?["message"] as? String) ?? "Claude token refreshed"
+                return ClaudeLoginRefreshResult(
+                    succeeded: true,
+                    message: (obj?["message"] as? String) ?? "Claude login refreshed.",
+                    restartRecommended: false
+                )
             }
-            return (obj?["error"] as? String) ?? "Refresh failed (HTTP \(code))"
+            if code == 404 {
+                return ClaudeLoginRefreshResult(
+                    succeeded: false,
+                    message: "Bridge update detected.",
+                    restartRecommended: true
+                )
+            }
+            return ClaudeLoginRefreshResult(
+                succeeded: false,
+                message: (obj?["error"] as? String) ?? "Claude login refresh failed (HTTP \(code)).",
+                restartRecommended: false
+            )
         } catch {
-            return "Refresh failed: \(error.localizedDescription)"
+            return ClaudeLoginRefreshResult(
+                succeeded: false,
+                message: "Bridge is not responding: \(error.localizedDescription)",
+                restartRecommended: true
+            )
         }
+    }
+
+    /// The loopback token the bridge writes next to its script, used to
+    /// authorize the state-changing /claude/refresh endpoint.
+    private static func bridgeAuthToken() -> String? {
+        let url = bridgeDirectoryURL.appendingPathComponent(".bridge_token")
+        guard let token = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Human-readable Claude token status from the bridge (Valid / Expired / …).

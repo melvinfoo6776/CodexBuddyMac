@@ -21,6 +21,14 @@ xcuserdata/
 .swiftpm/
 .build/
 
+# Bridge runtime secrets/state (live only under Application Support, never here).
+.bridge_token
+bridge.pid
+*.credentials.backup-*.json
+
+# Local tooling config (machine-specific, contains absolute home paths).
+.claude/settings.local.json
+
 # Local notes and obsolete pre-Xcode project sources.
 /XCODE_SETUP.md
 /PROJECT_STATUS.md

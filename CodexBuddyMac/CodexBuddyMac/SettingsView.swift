@@ -176,8 +176,30 @@ struct SettingsView: View {
     private func refreshClaudeLogin() async {
         isBusy = true
         defer { isBusy = false }
-        setupMessage = await BridgeService.refreshClaudeLogin()
+
+        let result = await BridgeService.refreshClaudeLogin()
         await refreshUsage()
+
+        if result.succeeded {
+            if diagnostics?.bridgeRunning != true {
+                setupMessage = "Claude login refreshed, but the bridge is not responding. Restart Bridge."
+            } else if isClaudeRateLimited {
+                setupMessage = "Claude login refreshed. Usage will update after the current rate limit ends."
+            } else {
+                setupMessage = "Claude login refreshed. Usage updated."
+            }
+        } else if result.restartRecommended {
+            setupMessage = "\(result.message) Restart Bridge."
+        } else {
+            setupMessage = result.message
+        }
+    }
+
+    private var isClaudeRateLimited: Bool {
+        guard let warning = poller.usage.claude.warning?.lowercased() else {
+            return false
+        }
+        return warning.contains("rate-limit") || warning.contains("http 429")
     }
 
     private func setLoginItem(_ enabled: Bool) {

@@ -26,6 +26,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Claude `401` recovery.** The bridge now uses Claude Code's current OAuth
+  token endpoint and, when a usage request returns `401`, refreshes the shared
+  credential and retries the usage request exactly once. Authentication errors
+  no longer create a misleading rate-limit countdown.
+- **Claude login refresh feedback.** The Settings action now checks bridge
+  availability, refreshes usage after a successful login refresh, preserves a
+  genuine Claude rate-limit deadline, and recommends **Restart Bridge** only
+  when the bridge is outdated or not responding.
 - **Claude usage stuck on a rate-limit warning.** The bridge now honors the
   server's `Retry-After` header on `429` responses instead of retrying on a
   fixed five-minute timer. Retrying inside the rate-limit window had been

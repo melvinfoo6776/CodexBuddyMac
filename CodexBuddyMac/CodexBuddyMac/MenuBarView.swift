@@ -3,6 +3,7 @@ import AppKit
 
 struct StatusPopoverView: View {
     @EnvironmentObject private var poller: UsagePoller
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(spacing: 0) {
@@ -95,7 +96,7 @@ struct StatusPopoverView: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    openSettings()
                     NSApp.activate(ignoringOtherApps: true)
                 } label: {
                     MenuActionRow(title: "Settings", systemImage: "gearshape")

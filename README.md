@@ -26,6 +26,10 @@ status, and one-click refresh controls.
 
 See [CHANGELOG.md](CHANGELOG.md) for recent fixes and changes.
 
+Possible longer-term improvements, including a native Swift 2.0 architecture,
+are tracked in [Future Considerations](docs/FUTURE_CONSIDERATIONS.md). These are
+ideas, not committed release plans.
+
 ## Requirements
 
 - macOS 26.5 or later
