@@ -74,7 +74,9 @@ extension ServiceUsage {
             return (label, date)
         }
         guard let next = candidates.min(by: { $0.1 < $1.1 }) else { return nil }
-        return "Next reset: \(next.0) \(UsageDateParser.relativeLabel(from: now, to: next.1))"
+        let actual = UsageDateParser.actualLabel(from: now, to: next.1)
+        let countdown = UsageDateParser.relativeLabel(from: now, to: next.1)
+        return "Next reset: \(next.0) \(actual) (\(countdown))"
     }
 }
 
@@ -93,6 +95,18 @@ private enum UsageDateParser {
 
     static func date(from value: String) -> Date? {
         isoWithFractionalSeconds.date(from: value) ?? iso.date(from: value)
+    }
+
+    static func actualLabel(from now: Date, to date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.timeStyle = .short
+        if Calendar.autoupdatingCurrent.isDate(date, inSameDayAs: now) {
+            return "at \(formatter.string(from: date))"
+        }
+        formatter.dateStyle = .medium
+        return "on \(formatter.string(from: date))"
     }
 
     static func relativeLabel(from now: Date, to date: Date) -> String {

@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **Provider reset timing.** The menu popover shows the next five-hour or
-  weekly reset for Codex and Claude.
+  weekly reset for Codex and Claude as both local clock time and a countdown.
 - **Version and token schedule in Settings.** Settings now shows the installed
   app version and when Claude's token will be refreshed automatically.
 
