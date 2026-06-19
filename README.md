@@ -20,11 +20,11 @@ status, and one-click refresh controls.
 - Five-hour and weekly usage windows
 - Local-only bridge bound to `127.0.0.1`
 - Automatic refresh with offline fallback
+- Automatic Claude OAuth token refresh (self-healing when the login expires)
+- Settings panel with bridge controls, diagnostics, and a Claude login refresh
 - Optional launch at login
 
-> [!NOTE]
-> The Settings feature is planned for future development and is not yet fully
-> implemented.
+See [CHANGELOG.md](CHANGELOG.md) for recent fixes and changes.
 
 ## Requirements
 
@@ -53,6 +53,18 @@ claude auth login
 
 The app starts its bundled bridge at `http://127.0.0.1:8789/usage.json`.
 
+## Settings
+
+Open Settings from the menu to:
+
+- Start, restart, and refresh the local bridge.
+- Check the Codex and Claude account status, including the Claude login token's
+  validity and time remaining.
+- **Refresh Claude Login** — renew the Claude OAuth token on demand if usage
+  shows a `401` / login-expired error. The token is also refreshed
+  automatically at launch and when it nears expiry, so this is rarely needed.
+- Adjust the refresh interval, labels, and launch-at-login, and open the logs.
+
 ## Privacy And Security
 
 - Credentials are not stored in this repository or copied into the app bundle.
@@ -75,7 +87,11 @@ Claude Code are trademarks of their respective owners.
 
 ## Troubleshooting
 
+- If Claude shows a `401` or login-expired error, use **Refresh Claude Login**
+  in Settings (the app also refreshes the token automatically).
 - If Claude remains at zero, run `claude auth status` and sign in if necessary.
+- If usage shows a rate-limit warning, it clears on its own once the provider's
+  `Retry-After` window elapses; repeated manual refreshes can prolong it.
 - If the bridge is stale, quit the app, stop any process using port `8789`, and
   relaunch the app.
 - App logs are stored under `~/Library/Application Support/CodexBuddy/Logs`.
