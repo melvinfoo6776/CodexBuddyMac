@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 struct BridgeDiagnostics {
     let bridgeInstalled: Bool
@@ -16,6 +17,20 @@ struct ClaudeLoginRefreshResult {
     let restartRecommended: Bool
 }
 
+private struct BridgeHealth: Decodable {
+    let status: String
+    let version: String
+    let buildID: String
+    let pid: Int32
+    let instanceID: String
+
+    enum CodingKeys: String, CodingKey {
+        case status, version, pid
+        case buildID = "build_id"
+        case instanceID = "instance_id"
+    }
+}
+
 enum BridgeService {
     static let bridgeURL = URL(string: "http://127.0.0.1:8789/usage.json")!
 
@@ -29,6 +44,7 @@ enum BridgeService {
     private static var stdoutHandle: FileHandle?
     private static var stderrHandle: FileHandle?
     private static var startAttempted = false
+    private static var ownsBridgeProcess = false
 
     static var appSupportURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -105,32 +121,33 @@ enum BridgeService {
         )
     }
 
-    static func startIfNeeded() throws {
+    static func startIfNeeded() async throws {
         try installBundledBridge()
+        let expectedBuildID = try installedBridgeBuildID()
 
-        if process?.isRunning == true {
+        if let health = await bridgeHealth(),
+           health.status == "ok",
+           health.buildID == expectedBuildID {
+            ownsBridgeProcess = process?.processIdentifier == health.pid
+            startAttempted = true
             return
         }
 
-        if process?.isRunning == false {
-            closeLogHandles()
-            process = nil
-            startAttempted = false
-        } else if startAttempted, process == nil {
-            startAttempted = false
-        }
-
-        if startAttempted {
+        // Async callers can overlap while the first launch is waiting for
+        // health. Join that launch instead of terminating and replacing it.
+        if startAttempted, let runningProcess = process, runningProcess.isRunning {
+            guard await waitForBridgeHealth(
+                expectedBuildID: expectedBuildID,
+                expectedPID: runningProcess.processIdentifier
+            ) != nil else {
+                throw BridgeServiceError.healthCheckFailed
+            }
             return
         }
 
-        startAttempted = true
-
-        // macOS does not kill child processes when the parent exits, so a quit
-        // or crash can leave the previous bridge running and holding port 8789.
-        // Reclaim it before binding, otherwise the new process fails with
-        // "Address already in use".
+        stopOwnedBridge()
         reclaimOrphanBridge()
+        startAttempted = true
 
         let stdoutURL = logsDirectoryURL.appendingPathComponent("usage-server.log")
         let stderrURL = logsDirectoryURL.appendingPathComponent("usage-server.err.log")
@@ -152,45 +169,51 @@ enum BridgeService {
         stderrHandle = try FileHandle(forWritingTo: stderrURL)
         bridge.standardOutput = stdoutHandle
         bridge.standardError = stderrHandle
+        let launchedStdoutHandle = stdoutHandle
+        let launchedStderrHandle = stderrHandle
         bridge.terminationHandler = { _ in
-            closeLogHandles()
+            try? launchedStdoutHandle?.close()
+            try? launchedStderrHandle?.close()
         }
 
         do {
             try bridge.run()
             process = bridge
-            writePidFile(bridge.processIdentifier)
+            ownsBridgeProcess = true
         } catch {
             closeLogHandles()
             startAttempted = false
+            ownsBridgeProcess = false
             throw error
         }
-    }
 
-    static func restart() throws {
-        stop()
-        try startIfNeeded()
-    }
-
-    /// Stop the bridge we own and clean up any orphan. Call on app termination
-    /// so the child does not outlive the app and block the next launch.
-    static func stop() {
-        if process?.isRunning == true {
-            process?.terminate()
-            process?.waitUntilExit()
+        guard let health = await waitForBridgeHealth(
+            expectedBuildID: expectedBuildID,
+            expectedPID: bridge.processIdentifier
+        ) else {
+            stopOwnedBridge()
+            throw BridgeServiceError.healthCheckFailed
         }
-        process = nil
-        startAttempted = false
-        closeLogHandles()
+        guard health.instanceID.isEmpty == false else {
+            stopOwnedBridge()
+            throw BridgeServiceError.healthCheckFailed
+        }
+    }
+
+    static func restart() async throws {
+        stopOwnedBridge()
         reclaimOrphanBridge()
+        try await startIfNeeded()
+    }
+
+    /// App termination must only stop a process launched by this app instance.
+    /// An adopted bridge may still be serving another running app instance.
+    static func stop() {
+        stopOwnedBridge()
     }
 
     private static var pidFileURL: URL {
         bridgeDirectoryURL.appendingPathComponent("bridge.pid")
-    }
-
-    private static func writePidFile(_ pid: Int32) {
-        try? String(pid).write(to: pidFileURL, atomically: true, encoding: .utf8)
     }
 
     private static func readPidFile() -> Int32? {
@@ -221,6 +244,59 @@ enum BridgeService {
         if kill(pid, 0) == 0 {
             kill(pid, SIGKILL)      // last resort
         }
+    }
+
+    private static func stopOwnedBridge() {
+        if ownsBridgeProcess, process?.isRunning == true {
+            process?.terminate()
+            process?.waitUntilExit()
+        }
+        process = nil
+        ownsBridgeProcess = false
+        startAttempted = false
+        closeLogHandles()
+    }
+
+    private static func installedBridgeBuildID() throws -> String {
+        let data = try Data(contentsOf: scriptURL)
+        return SHA256.hash(data: data).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func authenticatedRequest(url: URL, timeout: TimeInterval) -> URLRequest {
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        if let token = bridgeAuthToken() {
+            request.setValue(token, forHTTPHeaderField: "X-CodexBuddy-Token")
+        }
+        return request
+    }
+
+    private static func bridgeHealth() async -> BridgeHealth? {
+        guard let url = URL(string: "http://127.0.0.1:8789/health") else { return nil }
+        do {
+            let (data, response) = try await URLSession.shared.data(
+                for: authenticatedRequest(url: url, timeout: 1.0)
+            )
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            return try JSONDecoder().decode(BridgeHealth.self, from: data)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func waitForBridgeHealth(
+        expectedBuildID: String,
+        expectedPID: Int32
+    ) async -> BridgeHealth? {
+        for _ in 0..<30 {
+            if let health = await bridgeHealth(),
+               health.status == "ok",
+               health.buildID == expectedBuildID,
+               health.pid == expectedPID {
+                return health
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return nil
     }
 
     /// True if `pid` is a live process whose command line is our bridge script,
@@ -272,7 +348,7 @@ enum BridgeService {
     /// bridge itself needs restarting.
     static func refreshClaudeLogin() async -> ClaudeLoginRefreshResult {
         do {
-            try startIfNeeded()
+            try await startIfNeeded()
         } catch {
             return ClaudeLoginRefreshResult(
                 succeeded: false,
@@ -281,7 +357,7 @@ enum BridgeService {
             )
         }
 
-        guard await canReachBridge() else {
+        guard await bridgeHealth() != nil else {
             return ClaudeLoginRefreshResult(
                 succeeded: false,
                 message: "Bridge is not responding.",
@@ -348,7 +424,9 @@ enum BridgeService {
             return "Unknown"
         }
         do {
-            let (data, _) = try await URLSession.shared.data(for: URLRequest(url: url, timeoutInterval: 5))
+            let request = authenticatedRequest(url: url, timeout: 5)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return "Unknown" }
             guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
                 return "Unknown"
             }
@@ -363,13 +441,7 @@ enum BridgeService {
     }
 
     private static func canReachBridge() async -> Bool {
-        do {
-            let request = URLRequest(url: bridgeURL, timeoutInterval: 1.5)
-            let (_, response) = try await URLSession.shared.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
-        } catch {
-            return false
-        }
+        await bridgeHealth() != nil
     }
 
     private static func readClaudeUsageStatus() -> String {
@@ -409,11 +481,14 @@ private enum BridgeServiceDateParser {
 
 enum BridgeServiceError: LocalizedError {
     case missingBundledFile(String)
+    case healthCheckFailed
 
     var errorDescription: String? {
         switch self {
         case .missingBundledFile(let file):
             return "Bundled bridge file missing: \(file)"
+        case .healthCheckFailed:
+            return "Bridge launched but did not pass its health check."
         }
     }
 }

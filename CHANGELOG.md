@@ -26,6 +26,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Persistent Claude `429` recovery.** The bridge stores the upstream retry
+  deadline on disk and restores it after an app or bridge restart, preventing a
+  restart or manual refresh from immediately calling Claude again.
+- **Verified bridge start and restart.** The app now waits for an authenticated
+  health response containing the expected script build and process ID before
+  reporting success.
+- **Single bridge ownership.** An exclusive runtime lock prevents competing
+  Python bridge processes, while a second Mac app launch activates the existing
+  app instead of starting another bridge.
+- **Protected control endpoints.** Bridge health, Claude login status, and
+  Claude login refresh require the private loopback token. Runtime token, lock,
+  PID, and retry-state files are excluded from source control.
+
 - **Claude `401` recovery.** The bridge now uses Claude Code's current OAuth
   token endpoint and, when a usage request returns `401`, refreshes the shared
   credential and retries the usage request exactly once. Authentication errors

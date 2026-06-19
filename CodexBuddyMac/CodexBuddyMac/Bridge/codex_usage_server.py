@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
+import hashlib
 import json
 import os
 import secrets
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -55,6 +58,21 @@ MANUAL_REFRESH_MIN_INTERVAL_SECONDS = 30.0
 _manual_refresh_lock = threading.Lock()
 _last_manual_refresh_at: float = 0.0
 
+# Runtime identity and durable state. The build ID is calculated while the
+# module loads, so replacing the script on disk does not make an older running
+# process claim that it already loaded the new code.
+try:
+    BRIDGE_BUILD_ID = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+except OSError:
+    BRIDGE_BUILD_ID = "unknown"
+BRIDGE_INSTANCE_ID = secrets.token_hex(12)
+BRIDGE_STARTED_AT = time.time()
+CLAUDE_RETRY_STATE_FILE = Path(__file__).with_name("bridge_state.json")
+BRIDGE_LOCK_FILE = Path(__file__).with_name(".bridge.lock")
+BRIDGE_PID_FILE = Path(__file__).with_name("bridge.pid")
+MAX_PERSISTED_RETRY_SECONDS = 24 * 60 * 60
+BRIDGE_VERSION = "1.1"
+
 
 def load_or_create_auth_token(path: Path) -> str:
     """Read the loopback auth token, creating it with 0600 perms if missing."""
@@ -82,6 +100,66 @@ _claude_live_lock = threading.Lock()
 _claude_live_cache: dict[str, Any] | None = None
 _claude_live_fetched_at: float = 0.0
 _claude_live_retry_after: float = 0.0
+
+
+def acquire_bridge_lock(path: Path):
+    """Acquire the single-instance bridge lock and keep its file handle open."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    os.chmod(path, 0o600)
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
+def write_runtime_pid(path: Path) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(str(os.getpid()), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+
+
+def load_claude_retry_deadline(path: Path, now: float | None = None) -> float:
+    """Restore a valid wall-clock 429 deadline, ignoring stale/corrupt state."""
+    global _claude_live_retry_after
+    current = time.time() if now is None else now
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        deadline = float(payload["claude_retry_after_epoch"])
+    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+        deadline = 0.0
+    if deadline <= current or deadline > current + MAX_PERSISTED_RETRY_SECONDS:
+        deadline = 0.0
+    _claude_live_retry_after = deadline
+    return deadline
+
+
+def persist_claude_retry_deadline(path: Path, deadline: float) -> None:
+    """Atomically persist a wall-clock 429 deadline for the next bridge process."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        if deadline <= 0:
+            path.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
+            return
+        tmp.write_text(
+            json.dumps({"claude_retry_after_epoch": deadline}, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.chmod(tmp, 0o600)
+        tmp.replace(path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 class DiscoveryResponder(threading.Thread):
@@ -612,6 +690,7 @@ def _persist_claude_usage(path: Path, claude: dict[str, Any]) -> None:
 def _handle_claude_http_error(
     exc: HTTPError,
     now: float,
+    retry_state_file: Path | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Return a fallback result for a failed Claude usage request.
 
@@ -625,6 +704,8 @@ def _handle_claude_http_error(
 
     backoff = _retry_after_seconds(exc, CLAUDE_LIVE_BACKOFF_SECONDS)
     _claude_live_retry_after = now + backoff
+    if exc.code == 429 and retry_state_file is not None:
+        persist_claude_retry_deadline(retry_state_file, _claude_live_retry_after)
     eta = _format_backoff_eta(backoff)
     reason = "rate-limited" if exc.code == 429 else f"unavailable (HTTP {exc.code})"
     if _claude_live_cache is not None:
@@ -637,7 +718,10 @@ def _handle_claude_http_error(
     return None, f"Live Claude usage {reason}; retry in {eta}"
 
 
-def get_live_claude_usage(claude_file: Path | None = None) -> tuple[dict[str, Any] | None, str | None]:
+def get_live_claude_usage(
+    claude_file: Path | None = None,
+    retry_state_file: Path | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     """Live Claude usage with an in-process TTL cache and failure backoff.
 
     Returns (claude, warning). When a usable value is available (freshly fetched,
@@ -653,18 +737,19 @@ def get_live_claude_usage(claude_file: Path | None = None) -> tuple[dict[str, An
     if not token:
         return None, "Claude OAuth token not found; using cached file"
 
-    now = time.monotonic()
+    monotonic_now = time.monotonic()
+    epoch_now = time.time()
     with _claude_live_lock:
         # Serve the cached live value while it is still fresh.
-        if _claude_live_cache is not None and now - _claude_live_fetched_at < CLAUDE_LIVE_TTL_SECONDS:
+        if _claude_live_cache is not None and monotonic_now - _claude_live_fetched_at < CLAUDE_LIVE_TTL_SECONDS:
             return dict(_claude_live_cache), None
 
         # In a backoff window after a recent failure: do NOT call upstream again.
         # Retrying inside the Retry-After window just renews the 429 and the limit
         # never clears. This must hold even with no in-process cache (e.g. right
         # after a restart) -- otherwise every timer refresh re-trips the limit.
-        if now < _claude_live_retry_after:
-            eta = _format_backoff_eta(_claude_live_retry_after - now)
+        if epoch_now < _claude_live_retry_after:
+            eta = _format_backoff_eta(_claude_live_retry_after - epoch_now)
             if _claude_live_cache is not None:
                 stale = dict(_claude_live_cache)
                 now_dt = datetime.now(timezone.utc)
@@ -679,16 +764,18 @@ def get_live_claude_usage(claude_file: Path | None = None) -> tuple[dict[str, An
         try:
             data = fetch_claude_usage(token)
             _claude_live_cache = data
-            _claude_live_fetched_at = now
+            _claude_live_fetched_at = monotonic_now
             _claude_live_retry_after = 0.0
+            if retry_state_file is not None:
+                persist_claude_retry_deadline(retry_state_file, 0.0)
             if claude_file is not None:
                 _persist_claude_usage(claude_file, data)
             return dict(data), None
         except HTTPError as exc:
             if exc.code != 401:
-                return _handle_claude_http_error(exc, now)
+                return _handle_claude_http_error(exc, epoch_now, retry_state_file)
         except (URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
-            _claude_live_retry_after = now + CLAUDE_LIVE_BACKOFF_SECONDS
+            _claude_live_retry_after = epoch_now + CLAUDE_LIVE_BACKOFF_SECONDS
             if _claude_live_cache is not None:
                 stale = dict(_claude_live_cache)
                 now_dt = datetime.now(timezone.utc)
@@ -710,39 +797,48 @@ def get_live_claude_usage(claude_file: Path | None = None) -> tuple[dict[str, An
     if not refreshed_token:
         return None, "Claude login expired (HTTP 401); refreshed token unavailable"
 
-    retry_now = time.monotonic()
+    retry_monotonic_now = time.monotonic()
+    retry_epoch_now = time.time()
     with _claude_live_lock:
         # Another request may have completed the refresh and usage fetch while
         # this request was waiting for the refresh lock.
         if (
             _claude_live_cache is not None
-            and retry_now - _claude_live_fetched_at < CLAUDE_LIVE_TTL_SECONDS
+            and retry_monotonic_now - _claude_live_fetched_at < CLAUDE_LIVE_TTL_SECONDS
         ):
             return dict(_claude_live_cache), None
 
         try:
             data = fetch_claude_usage(refreshed_token)
         except HTTPError as exc:
-            return _handle_claude_http_error(exc, retry_now)
+            return _handle_claude_http_error(exc, retry_epoch_now, retry_state_file)
         except (URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
-            _claude_live_retry_after = retry_now + CLAUDE_LIVE_BACKOFF_SECONDS
+            _claude_live_retry_after = retry_epoch_now + CLAUDE_LIVE_BACKOFF_SECONDS
             return None, f"Live Claude usage unavailable after login refresh: {exc}"
 
         _claude_live_cache = data
-        _claude_live_fetched_at = retry_now
+        _claude_live_fetched_at = retry_monotonic_now
         _claude_live_retry_after = 0.0
+        if retry_state_file is not None:
+            persist_claude_retry_deadline(retry_state_file, 0.0)
         if claude_file is not None:
             _persist_claude_usage(claude_file, data)
         return dict(data), None
 
 
-def attach_claude_usage(payload: dict[str, Any], claude_file: Path, enabled: bool, live: bool = True) -> None:
+def attach_claude_usage(
+    payload: dict[str, Any],
+    claude_file: Path,
+    enabled: bool,
+    live: bool = True,
+    retry_state_file: Path | None = None,
+) -> None:
     if not enabled:
         return
 
     live_warning: str | None = None
     if live:
-        claude, live_warning = get_live_claude_usage(claude_file)
+        claude, live_warning = get_live_claude_usage(claude_file, retry_state_file)
         if claude is not None:
             payload["claude"] = claude
             return
@@ -827,9 +923,26 @@ class UsageHandler(BaseHTTPRequestHandler):
     live_claude: bool
     claude: bool
     auth_token: str | None = None
+    retry_state_file: Path
 
     def do_GET(self) -> None:
+        if self.path == "/health":
+            if not self._authorized():
+                self.write_json(403, {"status": "unauthorized"})
+                return
+            self.write_json(200, {
+                "status": "ok",
+                "version": BRIDGE_VERSION,
+                "build_id": BRIDGE_BUILD_ID,
+                "pid": os.getpid(),
+                "instance_id": BRIDGE_INSTANCE_ID,
+                "started_at": BRIDGE_STARTED_AT,
+            })
+            return
         if self.path == "/claude/status":
+            if not self._authorized():
+                self.write_json(403, {"error": "Unauthorized"})
+                return
             self.write_json(200, claude_token_status())
             return
         if self.path not in ("/", "/usage.json"):
@@ -861,7 +974,13 @@ class UsageHandler(BaseHTTPRequestHandler):
             self.write_json(500, {"error": str(exc)})
             return
 
-        attach_claude_usage(payload, self.claude_file, self.claude, self.live_claude)
+        attach_claude_usage(
+            payload,
+            self.claude_file,
+            self.claude,
+            self.live_claude,
+            self.retry_state_file,
+        )
         add_display_labels(payload, status_prefix, now)
         payload["served_at"] = now.isoformat()
         self.write_json(200, payload)
@@ -938,10 +1057,21 @@ def main() -> None:
     UsageHandler.live = not args.manual
     UsageHandler.live_claude = UsageHandler.live and not args.no_live_claude
     UsageHandler.claude = not args.no_claude
+    UsageHandler.retry_state_file = CLAUDE_RETRY_STATE_FILE
     # Loopback token gating the state-changing /claude/refresh endpoint. Stored
     # next to the script (the installed Bridge dir) so the app can read it.
     UsageHandler.auth_token = load_or_create_auth_token(Path(__file__).with_name(".bridge_token"))
-    server = ThreadingHTTPServer((args.host, args.port), UsageHandler)
+    bridge_lock = acquire_bridge_lock(BRIDGE_LOCK_FILE)
+    if bridge_lock is None:
+        print("Another CodexBuddy bridge process already owns the runtime lock", file=sys.stderr)
+        raise SystemExit(73)
+    load_claude_retry_deadline(UsageHandler.retry_state_file)
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), UsageHandler)
+    except OSError:
+        bridge_lock.close()
+        raise
+    write_runtime_pid(BRIDGE_PID_FILE)
     if not args.no_discovery:
         DiscoveryResponder(args.host, args.port, args.discovery_port, args.advertise_host).start()
     mode = "manual JSON" if UsageHandler.live is False else f"live Codex OAuth via {UsageHandler.auth_file}"

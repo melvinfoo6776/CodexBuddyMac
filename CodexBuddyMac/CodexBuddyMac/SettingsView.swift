@@ -148,15 +148,14 @@ struct SettingsView: View {
 
     private func startBridge() async {
         await runBusyAction("Bridge started.") {
-            try BridgeService.startIfNeeded()
+            try await BridgeService.startIfNeeded()
             await refreshUsage()
         }
     }
 
     private func restartBridge() async {
         await runBusyAction("Bridge restarted.") {
-            try BridgeService.restart()
-            try await Task.sleep(nanoseconds: 800_000_000)
+            try await BridgeService.restart()
             await refreshUsage()
         }
     }

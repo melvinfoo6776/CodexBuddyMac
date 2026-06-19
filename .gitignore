@@ -23,7 +23,9 @@ xcuserdata/
 
 # Bridge runtime secrets/state (live only under Application Support, never here).
 .bridge_token
+.bridge.lock
 bridge.pid
+bridge_state.json
 *.credentials.backup-*.json
 
 # Local tooling config (machine-specific, contains absolute home paths).

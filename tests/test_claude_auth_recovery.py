@@ -1,7 +1,9 @@
 import importlib.util
 import copy
 import json
+import os
 import tempfile
+import time
 import unittest
 from email.message import Message
 from pathlib import Path
@@ -137,6 +139,65 @@ class ClaudeAuthRecoveryTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(bridge._claude_live_retry_after, 12345.0)
+
+    def test_429_deadline_survives_bridge_module_restart(self):
+        first = load_bridge("bridge_persist_429_first")
+        directory = Path(tempfile.mkdtemp())
+        state_file = directory / "bridge_state.json"
+        usage_file = directory / "claude.json"
+        headers = Message()
+        headers["Retry-After"] = "600"
+        first.load_claude_oauth_token = lambda: "token"
+        first.fetch_claude_usage = lambda token: (_ for _ in ()).throw(
+            HTTPError(first.CLAUDE_USAGE_URL, 429, "Too Many Requests", headers, None)
+        )
+
+        result, warning = first.get_live_claude_usage(usage_file, state_file)
+
+        self.assertIsNone(result)
+        self.assertIn("rate-limited", warning)
+        self.assertTrue(state_file.exists())
+
+        second = load_bridge("bridge_persist_429_second")
+        calls = []
+        second.load_claude_oauth_token = lambda: "token"
+        second.fetch_claude_usage = lambda token: calls.append(token)
+        deadline = second.load_claude_retry_deadline(state_file)
+        result, warning = second.get_live_claude_usage(usage_file, state_file)
+
+        self.assertGreater(deadline, time.time())
+        self.assertIsNone(result)
+        self.assertIn("rate-limited", warning)
+        self.assertEqual(calls, [])
+
+    def test_bridge_lock_rejects_second_owner(self):
+        bridge = load_bridge("bridge_lock_test")
+        lock_file = Path(tempfile.mkdtemp()) / ".bridge.lock"
+        first = bridge.acquire_bridge_lock(lock_file)
+        self.assertIsNotNone(first)
+        try:
+            self.assertIsNone(bridge.acquire_bridge_lock(lock_file))
+            self.assertEqual(oct(lock_file.stat().st_mode & 0o777), "0o600")
+        finally:
+            first.close()
+
+    def test_control_auth_uses_configured_loopback_token(self):
+        bridge = load_bridge("bridge_control_auth_test")
+        handler = object.__new__(bridge.UsageHandler)
+        handler.auth_token = "expected-token"
+        handler.headers = Message()
+        self.assertFalse(handler._authorized())
+        handler.headers[bridge.BRIDGE_AUTH_HEADER] = "wrong-token"
+        self.assertFalse(handler._authorized())
+        handler.headers.replace_header(bridge.BRIDGE_AUTH_HEADER, "expected-token")
+        self.assertTrue(handler._authorized())
+
+    def test_bridge_auth_token_file_is_private(self):
+        bridge = load_bridge("bridge_auth_permissions_test")
+        token_file = Path(tempfile.mkdtemp()) / ".bridge_token"
+        token = bridge.load_or_create_auth_token(token_file)
+        self.assertTrue(token)
+        self.assertEqual(os.stat(token_file).st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

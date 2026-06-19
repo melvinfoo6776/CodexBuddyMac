@@ -40,8 +40,7 @@ final class UsagePoller: ObservableObject {
 
         var startupFailure: Error?
         do {
-            try BridgeService.startIfNeeded()
-            try await Task.sleep(nanoseconds: 800_000_000)
+            try await BridgeService.startIfNeeded()
         } catch {
             startupFailure = error
         }

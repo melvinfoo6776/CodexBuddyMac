@@ -56,7 +56,7 @@ fi
 
 # .gitignore covers the sensitive runtime/credential files.
 miss=""
-for pat in '.bridge_token' 'bridge.pid' '*.pem' '.env'; do
+for pat in '.bridge_token' '.bridge.lock' 'bridge.pid' 'bridge_state.json' '*.pem' '.env'; do
   grep -qF "$pat" .gitignore 2>/dev/null || miss="$miss $pat"
 done
 [ -z "$miss" ] && PASS ".gitignore covers credential/runtime files" \
@@ -93,6 +93,11 @@ if curl -fsS --max-time 4 "http://127.0.0.1:$PORT/usage.json" >/dev/null 2>&1; t
          -H "X-CodexBuddy-Token: definitely-wrong" "http://127.0.0.1:$PORT/claude/refresh")
   [ "$code" = "403" ] && PASS "POST /claude/refresh with wrong token = 403" \
                        || FAIL "POST /claude/refresh with wrong token = $code (expected 403)"
+
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+         "http://127.0.0.1:$PORT/health")
+  [ "$code" = "403" ] && PASS "GET /health without token = 403 (auth enforced)" \
+                       || FAIL "GET /health without token = $code (expected 403)"
 else
   SKIP "bridge not reachable on 127.0.0.1:$PORT — start the app to run runtime checks"
 fi
@@ -123,7 +128,7 @@ hdr "3. Dependencies"
 deps=$(grep -rhoE "^(import|from) [a-zA-Z0-9_]+" \
   CodexBuddyMac/CodexBuddyMac/Bridge/codex_usage_server.py 2>/dev/null \
   | awk '{print $2}' | sort -u | tr '\n' ' ')
-thirdparty=$(echo "$deps" | tr ' ' '\n' | grep -vE '^(__future__|argparse|copy|json|os|secrets|socket|ssl|subprocess|threading|time|datetime|http|pathlib|typing|urllib|certifi)?$' || true)
+thirdparty=$(echo "$deps" | tr ' ' '\n' | grep -vE '^(__future__|argparse|copy|fcntl|hashlib|json|os|secrets|socket|ssl|subprocess|sys|threading|time|datetime|http|pathlib|typing|urllib|certifi)?$' || true)
 if [ -z "$thirdparty" ]; then
   PASS "bridge uses Python stdlib only (no third-party imports)"
 else
