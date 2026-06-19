@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Provider reset timing.** The menu popover shows the next five-hour or
+  weekly reset for Codex and Claude.
+- **Version and token schedule in Settings.** Settings now shows the installed
+  app version and when Claude's token will be refreshed automatically.
+
 - **Automatic Claude token refresh.** When the Claude OAuth access token is
   expired (or about to expire), the bridge renews it using the stored refresh
   token and continues serving live usage instead of failing with `401`. The
@@ -25,6 +30,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the new Settings controls.
 
 ### Fixed
+
+- **Menu bar battery direction.** The battery now becomes emptier as either
+  provider's five-hour usage rises, using the higher Codex or Claude usage so a
+  nearly exhausted provider is never hidden by the other provider's balance.
 
 - **Persistent Claude `429` recovery.** The bridge stores the upstream retry
   deadline on disk and restores it after an app or bridge restart, preventing a

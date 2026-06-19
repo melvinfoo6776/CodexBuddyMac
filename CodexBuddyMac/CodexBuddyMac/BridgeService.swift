@@ -17,6 +17,11 @@ struct ClaudeLoginRefreshResult {
     let restartRecommended: Bool
 }
 
+struct ClaudeTokenDetails {
+    let status: String
+    let automaticRefresh: String
+}
+
 private struct BridgeHealth: Decodable {
     let status: String
     let version: String
@@ -418,26 +423,46 @@ enum BridgeService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// Human-readable Claude token status from the bridge (Valid / Expired / …).
-    static func claudeTokenStatus() async -> String {
+    /// Human-readable Claude token expiry and proactive refresh timing.
+    static func claudeTokenDetails() async -> ClaudeTokenDetails {
+        let unknown = ClaudeTokenDetails(status: "Unknown", automaticRefresh: "Unknown")
         guard let url = URL(string: "http://127.0.0.1:8789/claude/status") else {
-            return "Unknown"
+            return unknown
         }
         do {
             let request = authenticatedRequest(url: url, timeout: 5)
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return "Unknown" }
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return unknown }
             guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-                return "Unknown"
+                return unknown
             }
+            let status: String
             if let valid = obj["valid"] as? Bool, valid, let secs = obj["expires_in_seconds"] as? Int {
-                let mins = max(0, secs / 60)
-                return mins >= 60 ? "Valid (\(mins / 60)h \(mins % 60)m left)" : "Valid (\(mins)m left)"
+                status = "Valid (\(durationLabel(seconds: secs)) left)"
+            } else {
+                status = (obj["message"] as? String) ?? "Unknown"
             }
-            return (obj["message"] as? String) ?? "Unknown"
+
+            let automaticRefresh: String
+            if let seconds = obj["refresh_in_seconds"] as? Int {
+                automaticRefresh = seconds <= 0
+                    ? "On next usage refresh"
+                    : "In \(durationLabel(seconds: seconds))"
+            } else {
+                automaticRefresh = "Not scheduled"
+            }
+            return ClaudeTokenDetails(status: status, automaticRefresh: automaticRefresh)
         } catch {
-            return "Unknown"
+            return unknown
         }
+    }
+
+    private static func durationLabel(seconds: Int) -> String {
+        let minutes = max(0, seconds / 60)
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h \(minutes % 60)m" }
+        return "\(hours / 24)d \(hours % 24)h"
     }
 
     private static func canReachBridge() async -> Bool {

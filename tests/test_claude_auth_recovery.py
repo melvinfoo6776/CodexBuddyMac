@@ -199,6 +199,26 @@ class ClaudeAuthRecoveryTests(unittest.TestCase):
         self.assertTrue(token)
         self.assertEqual(os.stat(token_file).st_mode & 0o777, 0o600)
 
+    def test_token_status_reports_proactive_refresh_timing(self):
+        bridge = load_bridge("bridge_token_refresh_timing_test")
+        expires_at = (time.time() + 3600) * 1000
+        credentials = {
+            "claudeAiOauth": {
+                "accessToken": "access",
+                "refreshToken": "refresh",
+                "expiresAt": expires_at,
+            }
+        }
+        bridge._read_keychain_credentials = lambda: (json.dumps(credentials), credentials)
+
+        status = bridge.claude_token_status()
+
+        self.assertTrue(status["valid"])
+        self.assertGreaterEqual(status["expires_in_seconds"], 3598)
+        expected_refresh = 3600 - int(bridge.CLAUDE_TOKEN_REFRESH_SKEW_SECONDS)
+        self.assertGreaterEqual(status["refresh_in_seconds"], expected_refresh - 2)
+        self.assertLessEqual(status["refresh_in_seconds"], expected_refresh)
+
 
 if __name__ == "__main__":
     unittest.main()

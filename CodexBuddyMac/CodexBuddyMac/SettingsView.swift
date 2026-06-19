@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var loginItemEnabled = LoginItemService.isEnabled
     @State private var isBusy = false
     @State private var claudeTokenStatus = "Checking…"
+    @State private var claudeTokenRefresh = "Checking…"
 
     var body: some View {
         Form {
@@ -74,6 +75,8 @@ struct SettingsView: View {
                     isGood: claudeTokenStatus.hasPrefix("Valid")
                 )
 
+                LabeledContent("Automatic token refresh", value: claudeTokenRefresh)
+
                 Button("Refresh Claude Login") {
                     Task { await refreshClaudeLogin() }
                 }
@@ -110,6 +113,8 @@ struct SettingsView: View {
             }
 
             Section("Diagnostics") {
+                LabeledContent("App version", value: appVersionText)
+
                 if let diagnostics {
                     LabeledContent("App data", value: diagnostics.appSupportPath)
                     LabeledContent("Logs", value: diagnostics.logsPath)
@@ -169,7 +174,16 @@ struct SettingsView: View {
     private func refreshDiagnostics() async {
         diagnostics = await BridgeService.diagnostics()
         loginItemEnabled = LoginItemService.isEnabled
-        claudeTokenStatus = await BridgeService.claudeTokenStatus()
+        let tokenDetails = await BridgeService.claudeTokenDetails()
+        claudeTokenStatus = tokenDetails.status
+        claudeTokenRefresh = tokenDetails.automaticRefresh
+    }
+
+    private var appVersionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        guard let build, !build.isEmpty else { return version }
+        return "\(version) (\(build))"
     }
 
     private func refreshClaudeLogin() async {

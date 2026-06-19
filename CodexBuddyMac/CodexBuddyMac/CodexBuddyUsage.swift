@@ -56,6 +56,52 @@ struct UsageWindow: Codable, Equatable {
         guard limit > 0 else { return 0 }
         return max(0, min(100, Int((Double(remaining) / Double(limit)) * 100.0)))
     }
+
+    var resetDate: Date? {
+        guard let resetAt, !resetAt.isEmpty else { return nil }
+        return UsageDateParser.date(from: resetAt)
+    }
+}
+
+extension ServiceUsage {
+    var nextResetText: String? {
+        let now = Date()
+        let candidates: [(String, Date)] = [
+            ("5H", fiveHour.resetDate),
+            ("Week", weekly.resetDate)
+        ].compactMap { label, date in
+            guard let date, date > now else { return nil }
+            return (label, date)
+        }
+        guard let next = candidates.min(by: { $0.1 < $1.1 }) else { return nil }
+        return "Next reset: \(next.0) \(UsageDateParser.relativeLabel(from: now, to: next.1))"
+    }
+}
+
+private enum UsageDateParser {
+    private static let isoWithFractionalSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let iso: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    static func date(from value: String) -> Date? {
+        isoWithFractionalSeconds.date(from: value) ?? iso.date(from: value)
+    }
+
+    static func relativeLabel(from now: Date, to date: Date) -> String {
+        let totalMinutes = max(0, Int(date.timeIntervalSince(now) / 60))
+        if totalMinutes < 60 { return "in \(totalMinutes)m" }
+        let hours = totalMinutes / 60
+        if hours < 24 { return "in \(hours)h \(totalMinutes % 60)m" }
+        return "in \(hours / 24)d \(hours % 24)h"
+    }
 }
 
 extension CodexBuddyUsage {

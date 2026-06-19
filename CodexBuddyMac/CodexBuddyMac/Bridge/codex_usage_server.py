@@ -424,6 +424,7 @@ def claude_token_status() -> dict[str, Any]:
         valid = seconds > 0
         return {"present": True, "valid": valid, "can_refresh": can_refresh,
                 "expires_in_seconds": int(seconds),
+                "refresh_in_seconds": int(seconds - CLAUDE_TOKEN_REFRESH_SKEW_SECONDS),
                 "message": "Valid" if valid else "Expired"}
     return {"present": True, "valid": True, "can_refresh": can_refresh,
             "message": "Valid (no expiry recorded)"}

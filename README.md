@@ -18,6 +18,7 @@ status, and one-click refresh controls.
 
 - Codex and Claude Code usage in one menu bar view
 - Five-hour and weekly usage windows
+- Next provider usage reset time and combined capacity battery indicator
 - Local-only bridge bound to `127.0.0.1`
 - Automatic refresh with offline fallback
 - Automatic Claude OAuth token refresh (self-healing when the login expires)
@@ -63,7 +64,8 @@ Open Settings from the menu to:
 
 - Start, restart, and refresh the local bridge.
 - Check the Codex and Claude account status, including the Claude login token's
-  validity and time remaining.
+  validity, expiry, and automatic refresh timing.
+- Check the installed app version under Diagnostics.
 - **Refresh Claude Login** — renew the Claude OAuth token on demand if usage
   shows a `401` / login-expired error. The token is also refreshed
   automatically at launch and when it nears expiry, so this is rarely needed.
