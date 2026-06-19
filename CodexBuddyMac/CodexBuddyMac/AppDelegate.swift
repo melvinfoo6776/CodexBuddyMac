@@ -9,8 +9,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var cancellables = Set<AnyCancellable>()
+    private var isDuplicateInstance = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        guard let existing = NSRunningApplication.runningApplications(
+            withBundleIdentifier: bundleIdentifier
+        ).first(where: { $0.processIdentifier != currentPID }) else { return }
+
+        isDuplicateInstance = true
+        existing.activate(options: [.activateAllWindows])
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !isDuplicateInstance else { return }
         NSApp.setActivationPolicy(.accessory)
         setupStatusItem()
         setupPopover()
@@ -18,9 +32,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Don't let the bridge outlive the app; an orphan would hold port 8789
-        // and block the next launch.
-        BridgeService.stop()
+        if !isDuplicateInstance {
+            BridgeService.stop()
+        }
     }
 
     private func setupStatusItem() {
@@ -40,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupPopover() {
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 320, height: 305)
+        popover.contentSize = NSSize(width: 320, height: 330)
         popover.contentViewController = NSHostingController(
             rootView: StatusPopoverView()
                 .environmentObject(poller)

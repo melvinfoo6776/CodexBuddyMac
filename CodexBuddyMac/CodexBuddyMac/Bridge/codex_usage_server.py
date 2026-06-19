@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
+import hashlib
 import json
 import os
+import secrets
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -36,7 +40,7 @@ CLAUDE_CREDENTIALS_FILE = Path("~/.claude/.credentials.json")
 # are written back to the SAME Keychain item (single source of truth) so Claude
 # Code stays in sync; everything other than the three claudeAiOauth token fields
 # (notably the mcpOAuth blob) is preserved untouched.
-CLAUDE_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 # Refresh a little before actual expiry so a poll never races the deadline.
 CLAUDE_TOKEN_REFRESH_SKEW_SECONDS = 120.0
@@ -44,6 +48,47 @@ CLAUDE_TOKEN_REFRESH_SKEW_SECONDS = 120.0
 CLAUDE_REFRESH_BACKOFF_SECONDS = 300.0
 _claude_refresh_lock = threading.Lock()
 _claude_refresh_retry_after: float = 0.0
+
+# The /claude/refresh endpoint changes state (rotates the token, writes the
+# Keychain). Gate it behind a loopback token so a stray local process or a
+# browser hitting 127.0.0.1 cannot trigger it, and rate-limit successful manual
+# refreshes so it cannot be spammed into churning token rotations.
+BRIDGE_AUTH_HEADER = "X-CodexBuddy-Token"
+MANUAL_REFRESH_MIN_INTERVAL_SECONDS = 30.0
+_manual_refresh_lock = threading.Lock()
+_last_manual_refresh_at: float = 0.0
+
+# Runtime identity and durable state. The build ID is calculated while the
+# module loads, so replacing the script on disk does not make an older running
+# process claim that it already loaded the new code.
+try:
+    BRIDGE_BUILD_ID = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+except OSError:
+    BRIDGE_BUILD_ID = "unknown"
+BRIDGE_INSTANCE_ID = secrets.token_hex(12)
+BRIDGE_STARTED_AT = time.time()
+CLAUDE_RETRY_STATE_FILE = Path(__file__).with_name("bridge_state.json")
+BRIDGE_LOCK_FILE = Path(__file__).with_name(".bridge.lock")
+BRIDGE_PID_FILE = Path(__file__).with_name("bridge.pid")
+MAX_PERSISTED_RETRY_SECONDS = 24 * 60 * 60
+BRIDGE_VERSION = "1.1"
+
+
+def load_or_create_auth_token(path: Path) -> str:
+    """Read the loopback auth token, creating it with 0600 perms if missing."""
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(32)
+    try:
+        path.write_text(token, encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return token
 
 # The OAuth usage endpoint is sensitive to request rate and will return 429 if
 # polled too often (the ESP, the statusline script, and Claude Code all hit it).
@@ -55,6 +100,66 @@ _claude_live_lock = threading.Lock()
 _claude_live_cache: dict[str, Any] | None = None
 _claude_live_fetched_at: float = 0.0
 _claude_live_retry_after: float = 0.0
+
+
+def acquire_bridge_lock(path: Path):
+    """Acquire the single-instance bridge lock and keep its file handle open."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    os.chmod(path, 0o600)
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
+def write_runtime_pid(path: Path) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(str(os.getpid()), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+
+
+def load_claude_retry_deadline(path: Path, now: float | None = None) -> float:
+    """Restore a valid wall-clock 429 deadline, ignoring stale/corrupt state."""
+    global _claude_live_retry_after
+    current = time.time() if now is None else now
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        deadline = float(payload["claude_retry_after_epoch"])
+    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+        deadline = 0.0
+    if deadline <= current or deadline > current + MAX_PERSISTED_RETRY_SECONDS:
+        deadline = 0.0
+    _claude_live_retry_after = deadline
+    return deadline
+
+
+def persist_claude_retry_deadline(path: Path, deadline: float) -> None:
+    """Atomically persist a wall-clock 429 deadline for the next bridge process."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        if deadline <= 0:
+            path.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
+            return
+        tmp.write_text(
+            json.dumps({"claude_retry_after_epoch": deadline}, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.chmod(tmp, 0o600)
+        tmp.replace(path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 class DiscoveryResponder(threading.Thread):
@@ -319,12 +424,13 @@ def claude_token_status() -> dict[str, Any]:
         valid = seconds > 0
         return {"present": True, "valid": valid, "can_refresh": can_refresh,
                 "expires_in_seconds": int(seconds),
+                "refresh_in_seconds": int(seconds - CLAUDE_TOKEN_REFRESH_SKEW_SECONDS),
                 "message": "Valid" if valid else "Expired"}
     return {"present": True, "valid": True, "can_refresh": can_refresh,
             "message": "Valid (no expiry recorded)"}
 
 
-def refresh_claude_token() -> dict[str, Any]:
+def refresh_claude_token(expected_access_token: str | None = None) -> dict[str, Any]:
     """Refresh the Claude access token using the stored refresh token.
 
     Preserves the entire credential and updates only the three token fields under
@@ -346,6 +452,9 @@ def refresh_claude_token() -> dict[str, Any]:
         oauth = data.get("claudeAiOauth")
         if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
             return {"ok": False, "error": "No refresh token available"}
+        if expected_access_token is not None and oauth.get("accessToken") != expected_access_token:
+            return {"ok": True, "message": "Claude token already refreshed by another request",
+                    "expires_in_seconds": None, "rotated_refresh_token": False}
         account = _keychain_account()
         if not account:
             return {"ok": False, "error": "Could not determine Keychain account"}
@@ -418,11 +527,6 @@ def refresh_claude_token() -> dict[str, Any]:
             return {"ok": False, "error": "Write verification failed; restored original credential"}
 
         _claude_refresh_retry_after = 0.0
-
-    # Clear the usage retry window so the next poll uses the fresh token.
-    with _claude_live_lock:
-        global _claude_live_retry_after
-        _claude_live_retry_after = 0.0
 
     return {"ok": True, "message": "Claude token refreshed",
             "expires_in_seconds": int(expires_in) if isinstance(expires_in, (int, float)) else None,
@@ -584,7 +688,41 @@ def _persist_claude_usage(path: Path, claude: dict[str, Any]) -> None:
             pass
 
 
-def get_live_claude_usage(claude_file: Path | None = None) -> tuple[dict[str, Any] | None, str | None]:
+def _handle_claude_http_error(
+    exc: HTTPError,
+    now: float,
+    retry_state_file: Path | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return a fallback result for a failed Claude usage request.
+
+    The caller holds ``_claude_live_lock``. Authentication failures are not
+    rate-limit failures, so a 401 must never create a Retry-After countdown.
+    """
+    global _claude_live_retry_after
+
+    if exc.code == 401:
+        return None, "Claude login expired (HTTP 401); refresh required"
+
+    backoff = _retry_after_seconds(exc, CLAUDE_LIVE_BACKOFF_SECONDS)
+    _claude_live_retry_after = now + backoff
+    if exc.code == 429 and retry_state_file is not None:
+        persist_claude_retry_deadline(retry_state_file, _claude_live_retry_after)
+    eta = _format_backoff_eta(backoff)
+    reason = "rate-limited" if exc.code == 429 else f"unavailable (HTTP {exc.code})"
+    if _claude_live_cache is not None:
+        stale = dict(_claude_live_cache)
+        now_dt = datetime.now(timezone.utc)
+        for key in ("five_hour", "weekly", "seven_day"):
+            expire_passed_window(stale.get(key), now_dt)
+        stale["warning"] = f"Live Claude usage {reason}; showing last known live values (retry in {eta})"
+        return stale, None
+    return None, f"Live Claude usage {reason}; retry in {eta}"
+
+
+def get_live_claude_usage(
+    claude_file: Path | None = None,
+    retry_state_file: Path | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     """Live Claude usage with an in-process TTL cache and failure backoff.
 
     Returns (claude, warning). When a usable value is available (freshly fetched,
@@ -600,18 +738,19 @@ def get_live_claude_usage(claude_file: Path | None = None) -> tuple[dict[str, An
     if not token:
         return None, "Claude OAuth token not found; using cached file"
 
-    now = time.monotonic()
+    monotonic_now = time.monotonic()
+    epoch_now = time.time()
     with _claude_live_lock:
         # Serve the cached live value while it is still fresh.
-        if _claude_live_cache is not None and now - _claude_live_fetched_at < CLAUDE_LIVE_TTL_SECONDS:
+        if _claude_live_cache is not None and monotonic_now - _claude_live_fetched_at < CLAUDE_LIVE_TTL_SECONDS:
             return dict(_claude_live_cache), None
 
         # In a backoff window after a recent failure: do NOT call upstream again.
         # Retrying inside the Retry-After window just renews the 429 and the limit
         # never clears. This must hold even with no in-process cache (e.g. right
         # after a restart) -- otherwise every timer refresh re-trips the limit.
-        if now < _claude_live_retry_after:
-            eta = _format_backoff_eta(_claude_live_retry_after - now)
+        if epoch_now < _claude_live_retry_after:
+            eta = _format_backoff_eta(_claude_live_retry_after - epoch_now)
             if _claude_live_cache is not None:
                 stale = dict(_claude_live_cache)
                 now_dt = datetime.now(timezone.utc)
@@ -626,28 +765,18 @@ def get_live_claude_usage(claude_file: Path | None = None) -> tuple[dict[str, An
         try:
             data = fetch_claude_usage(token)
             _claude_live_cache = data
-            _claude_live_fetched_at = now
+            _claude_live_fetched_at = monotonic_now
             _claude_live_retry_after = 0.0
+            if retry_state_file is not None:
+                persist_claude_retry_deadline(retry_state_file, 0.0)
             if claude_file is not None:
                 _persist_claude_usage(claude_file, data)
             return dict(data), None
         except HTTPError as exc:
-            # Honor the server's Retry-After (the OAuth usage endpoint returns a
-            # long one, e.g. ~46m). Retrying earlier just re-trips the limit.
-            backoff = _retry_after_seconds(exc, CLAUDE_LIVE_BACKOFF_SECONDS)
-            _claude_live_retry_after = now + backoff
-            eta = _format_backoff_eta(backoff)
-            reason = "rate-limited" if exc.code == 429 else f"unavailable (HTTP {exc.code})"
-            if _claude_live_cache is not None:
-                stale = dict(_claude_live_cache)
-                now_dt = datetime.now(timezone.utc)
-                for key in ("five_hour", "weekly", "seven_day"):
-                    expire_passed_window(stale.get(key), now_dt)
-                stale["warning"] = f"Live Claude usage {reason}; showing last known live values (retry in {eta})"
-                return stale, None
-            return None, f"Live Claude usage {reason}; retry in {eta}"
+            if exc.code != 401:
+                return _handle_claude_http_error(exc, epoch_now, retry_state_file)
         except (URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
-            _claude_live_retry_after = now + CLAUDE_LIVE_BACKOFF_SECONDS
+            _claude_live_retry_after = epoch_now + CLAUDE_LIVE_BACKOFF_SECONDS
             if _claude_live_cache is not None:
                 stale = dict(_claude_live_cache)
                 now_dt = datetime.now(timezone.utc)
@@ -657,14 +786,60 @@ def get_live_claude_usage(claude_file: Path | None = None) -> tuple[dict[str, An
                 return stale, None
             return None, f"Live Claude usage unavailable: {exc}"
 
+    # Refresh outside _claude_live_lock. Manual refresh takes the refresh lock
+    # before clearing live state, so refreshing while holding the live lock would
+    # invert the lock order and could deadlock.
+    refresh = refresh_claude_token(expected_access_token=token)
+    if not refresh.get("ok"):
+        detail = str(refresh.get("error") or "unknown refresh error")
+        return None, f"Claude login expired (HTTP 401); {detail}"
 
-def attach_claude_usage(payload: dict[str, Any], claude_file: Path, enabled: bool, live: bool = True) -> None:
+    refreshed_token = load_claude_oauth_token()
+    if not refreshed_token:
+        return None, "Claude login expired (HTTP 401); refreshed token unavailable"
+
+    retry_monotonic_now = time.monotonic()
+    retry_epoch_now = time.time()
+    with _claude_live_lock:
+        # Another request may have completed the refresh and usage fetch while
+        # this request was waiting for the refresh lock.
+        if (
+            _claude_live_cache is not None
+            and retry_monotonic_now - _claude_live_fetched_at < CLAUDE_LIVE_TTL_SECONDS
+        ):
+            return dict(_claude_live_cache), None
+
+        try:
+            data = fetch_claude_usage(refreshed_token)
+        except HTTPError as exc:
+            return _handle_claude_http_error(exc, retry_epoch_now, retry_state_file)
+        except (URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
+            _claude_live_retry_after = retry_epoch_now + CLAUDE_LIVE_BACKOFF_SECONDS
+            return None, f"Live Claude usage unavailable after login refresh: {exc}"
+
+        _claude_live_cache = data
+        _claude_live_fetched_at = retry_monotonic_now
+        _claude_live_retry_after = 0.0
+        if retry_state_file is not None:
+            persist_claude_retry_deadline(retry_state_file, 0.0)
+        if claude_file is not None:
+            _persist_claude_usage(claude_file, data)
+        return dict(data), None
+
+
+def attach_claude_usage(
+    payload: dict[str, Any],
+    claude_file: Path,
+    enabled: bool,
+    live: bool = True,
+    retry_state_file: Path | None = None,
+) -> None:
     if not enabled:
         return
 
     live_warning: str | None = None
     if live:
-        claude, live_warning = get_live_claude_usage(claude_file)
+        claude, live_warning = get_live_claude_usage(claude_file, retry_state_file)
         if claude is not None:
             payload["claude"] = claude
             return
@@ -748,9 +923,27 @@ class UsageHandler(BaseHTTPRequestHandler):
     live: bool
     live_claude: bool
     claude: bool
+    auth_token: str | None = None
+    retry_state_file: Path
 
     def do_GET(self) -> None:
+        if self.path == "/health":
+            if not self._authorized():
+                self.write_json(403, {"status": "unauthorized"})
+                return
+            self.write_json(200, {
+                "status": "ok",
+                "version": BRIDGE_VERSION,
+                "build_id": BRIDGE_BUILD_ID,
+                "pid": os.getpid(),
+                "instance_id": BRIDGE_INSTANCE_ID,
+                "started_at": BRIDGE_STARTED_AT,
+            })
+            return
         if self.path == "/claude/status":
+            if not self._authorized():
+                self.write_json(403, {"error": "Unauthorized"})
+                return
             self.write_json(200, claude_token_status())
             return
         if self.path not in ("/", "/usage.json"):
@@ -782,17 +975,47 @@ class UsageHandler(BaseHTTPRequestHandler):
             self.write_json(500, {"error": str(exc)})
             return
 
-        attach_claude_usage(payload, self.claude_file, self.claude, self.live_claude)
+        attach_claude_usage(
+            payload,
+            self.claude_file,
+            self.claude,
+            self.live_claude,
+            self.retry_state_file,
+        )
         add_display_labels(payload, status_prefix, now)
         payload["served_at"] = now.isoformat()
         self.write_json(200, payload)
 
     def do_POST(self) -> None:
         if self.path == "/claude/refresh":
+            if not self._authorized():
+                self.write_json(403, {"ok": False, "error": "Unauthorized"})
+                return
+            if not self._allow_manual_refresh():
+                self.write_json(429, {"ok": False,
+                                      "error": "Refresh requested too frequently; try again shortly"})
+                return
             result = refresh_claude_token()
             self.write_json(200 if result.get("ok") else 502, result)
             return
         self.send_error(404)
+
+    def _authorized(self) -> bool:
+        """Constant-time check of the loopback token. Open if none is configured."""
+        token = self.auth_token
+        if not token:
+            return True
+        provided = self.headers.get(BRIDGE_AUTH_HEADER)
+        return bool(provided) and secrets.compare_digest(provided, token)
+
+    def _allow_manual_refresh(self) -> bool:
+        global _last_manual_refresh_at
+        with _manual_refresh_lock:
+            now = time.monotonic()
+            if now - _last_manual_refresh_at < MANUAL_REFRESH_MIN_INTERVAL_SECONDS:
+                return False
+            _last_manual_refresh_at = now
+            return True
 
     def write_json(self, status: int, payload: dict[str, Any]) -> None:
         try:
@@ -835,7 +1058,21 @@ def main() -> None:
     UsageHandler.live = not args.manual
     UsageHandler.live_claude = UsageHandler.live and not args.no_live_claude
     UsageHandler.claude = not args.no_claude
-    server = ThreadingHTTPServer((args.host, args.port), UsageHandler)
+    UsageHandler.retry_state_file = CLAUDE_RETRY_STATE_FILE
+    # Loopback token gating the state-changing /claude/refresh endpoint. Stored
+    # next to the script (the installed Bridge dir) so the app can read it.
+    UsageHandler.auth_token = load_or_create_auth_token(Path(__file__).with_name(".bridge_token"))
+    bridge_lock = acquire_bridge_lock(BRIDGE_LOCK_FILE)
+    if bridge_lock is None:
+        print("Another CodexBuddy bridge process already owns the runtime lock", file=sys.stderr)
+        raise SystemExit(73)
+    load_claude_retry_deadline(UsageHandler.retry_state_file)
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), UsageHandler)
+    except OSError:
+        bridge_lock.close()
+        raise
+    write_runtime_pid(BRIDGE_PID_FILE)
     if not args.no_discovery:
         DiscoveryResponder(args.host, args.port, args.discovery_port, args.advertise_host).start()
     mode = "manual JSON" if UsageHandler.live is False else f"live Codex OAuth via {UsageHandler.auth_file}"

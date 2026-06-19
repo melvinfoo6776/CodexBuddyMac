@@ -4,9 +4,14 @@ All notable changes to CodexBuddyMac are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — 2026-06-19
+## [1.1] — 2026-06-19
 
 ### Added
+
+- **Provider reset timing.** The menu popover shows the next five-hour or
+  weekly reset for Codex and Claude as both local clock time and a countdown.
+- **Version and token schedule in Settings.** Settings now shows the installed
+  app version and when Claude's token will be refreshed automatically.
 
 - **Automatic Claude token refresh.** When the Claude OAuth access token is
   expired (or about to expire), the bridge renews it using the stored refresh
@@ -23,9 +28,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   long until it expires.
 - **Bridge endpoints** `GET /claude/status` and `POST /claude/refresh` backing
   the new Settings controls.
+- **Security tooling.** `scripts/security-check.sh` (on-demand audit) and
+  `scripts/check-secrets.sh` (pre-push secret scan); GitHub secret-scanning push
+  protection enabled on the repository.
 
 ### Fixed
 
+- **Menu bar battery direction.** The battery now becomes emptier as either
+  provider's five-hour usage rises, using the higher Codex or Claude usage so a
+  nearly exhausted provider is never hidden by the other provider's balance.
+
+- **Persistent Claude `429` recovery.** The bridge stores the upstream retry
+  deadline on disk and restores it after an app or bridge restart, preventing a
+  restart or manual refresh from immediately calling Claude again.
+- **Verified bridge start and restart.** The app now waits for an authenticated
+  health response containing the expected script build and process ID before
+  reporting success.
+- **Single bridge ownership.** An exclusive runtime lock prevents competing
+  Python bridge processes, while a second Mac app launch activates the existing
+  app instead of starting another bridge.
+- **Protected control endpoints.** Bridge health, Claude login status, and
+  Claude login refresh require the private loopback token. Runtime token, lock,
+  PID, and retry-state files are excluded from source control.
+
+- **Claude `401` recovery.** The bridge now uses Claude Code's current OAuth
+  token endpoint and, when a usage request returns `401`, refreshes the shared
+  credential and retries the usage request exactly once. Authentication errors
+  no longer create a misleading rate-limit countdown.
+- **Claude login refresh feedback.** The Settings action now checks bridge
+  availability, refreshes usage after a successful login refresh, preserves a
+  genuine Claude rate-limit deadline, and recommends **Restart Bridge** only
+  when the bridge is outdated or not responding.
 - **Claude usage stuck on a rate-limit warning.** The bridge now honors the
   server's `Retry-After` header on `429` responses instead of retrying on a
   fixed five-minute timer. Retrying inside the rate-limit window had been

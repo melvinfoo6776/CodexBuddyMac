@@ -3,6 +3,7 @@ import AppKit
 
 struct StatusPopoverView: View {
     @EnvironmentObject private var poller: UsagePoller
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(spacing: 0) {
@@ -95,7 +96,7 @@ struct StatusPopoverView: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    openSettings()
                     NSApp.activate(ignoringOtherApps: true)
                 } label: {
                     MenuActionRow(title: "Settings", systemImage: "gearshape")
@@ -128,6 +129,12 @@ struct ServiceDetailView: View {
 
                 Text("\(usage.fiveHour.remaining) left")
                     .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let nextResetText = usage.nextResetText {
+                Text(nextResetText)
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
 
@@ -247,16 +254,21 @@ extension UsagePoller {
     var menuBarBatterySymbol: String {
         guard isOnline else { return "exclamationmark.circle" }
 
-        let percent = max(usage.codex.fiveHour.usedPercent, usage.claude.fiveHour.usedPercent)
-        switch percent {
+        let combinedUsage = max(
+            usage.codex.fiveHour.usedPercent,
+            usage.claude.fiveHour.usedPercent
+        )
+        switch combinedUsage {
         case 0..<25:
-            return "battery.25percent"
-        case 25..<50:
-            return "battery.50percent"
-        case 50..<75:
-            return "battery.75percent"
-        default:
             return "battery.100percent"
+        case 25..<50:
+            return "battery.75percent"
+        case 50..<75:
+            return "battery.50percent"
+        case 75..<100:
+            return "battery.25percent"
+        default:
+            return "battery.0percent"
         }
     }
 

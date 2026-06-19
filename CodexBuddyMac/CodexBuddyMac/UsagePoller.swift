@@ -10,6 +10,7 @@ final class UsagePoller: ObservableObject {
 
     private let store = UsageStore()
     private var timer: Timer?
+    private var isRefreshing = false
 
     init() {
         AppSettings.configureDefaults()
@@ -30,10 +31,16 @@ final class UsagePoller: ObservableObject {
     }
 
     func refresh() async {
+        guard !isRefreshing else {
+            return
+        }
+
+        isRefreshing = true
+        defer { isRefreshing = false }
+
         var startupFailure: Error?
         do {
-            try BridgeService.startIfNeeded()
-            try await Task.sleep(nanoseconds: 800_000_000)
+            try await BridgeService.startIfNeeded()
         } catch {
             startupFailure = error
         }

@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var loginItemEnabled = LoginItemService.isEnabled
     @State private var isBusy = false
     @State private var claudeTokenStatus = "Checking…"
+    @State private var claudeTokenRefresh = "Checking…"
 
     var body: some View {
         Form {
@@ -74,6 +75,8 @@ struct SettingsView: View {
                     isGood: claudeTokenStatus.hasPrefix("Valid")
                 )
 
+                LabeledContent("Automatic token refresh", value: claudeTokenRefresh)
+
                 Button("Refresh Claude Login") {
                     Task { await refreshClaudeLogin() }
                 }
@@ -110,6 +113,8 @@ struct SettingsView: View {
             }
 
             Section("Diagnostics") {
+                LabeledContent("App version", value: appVersionText)
+
                 if let diagnostics {
                     LabeledContent("App data", value: diagnostics.appSupportPath)
                     LabeledContent("Logs", value: diagnostics.logsPath)
@@ -148,15 +153,14 @@ struct SettingsView: View {
 
     private func startBridge() async {
         await runBusyAction("Bridge started.") {
-            try BridgeService.startIfNeeded()
+            try await BridgeService.startIfNeeded()
             await refreshUsage()
         }
     }
 
     private func restartBridge() async {
         await runBusyAction("Bridge restarted.") {
-            try BridgeService.restart()
-            try await Task.sleep(nanoseconds: 800_000_000)
+            try await BridgeService.restart()
             await refreshUsage()
         }
     }
@@ -170,14 +174,45 @@ struct SettingsView: View {
     private func refreshDiagnostics() async {
         diagnostics = await BridgeService.diagnostics()
         loginItemEnabled = LoginItemService.isEnabled
-        claudeTokenStatus = await BridgeService.claudeTokenStatus()
+        let tokenDetails = await BridgeService.claudeTokenDetails()
+        claudeTokenStatus = tokenDetails.status
+        claudeTokenRefresh = tokenDetails.automaticRefresh
+    }
+
+    private var appVersionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        guard let build, !build.isEmpty else { return version }
+        return "\(version) (\(build))"
     }
 
     private func refreshClaudeLogin() async {
         isBusy = true
         defer { isBusy = false }
-        setupMessage = await BridgeService.refreshClaudeLogin()
+
+        let result = await BridgeService.refreshClaudeLogin()
         await refreshUsage()
+
+        if result.succeeded {
+            if diagnostics?.bridgeRunning != true {
+                setupMessage = "Claude login refreshed, but the bridge is not responding. Restart Bridge."
+            } else if isClaudeRateLimited {
+                setupMessage = "Claude login refreshed. Usage will update after the current rate limit ends."
+            } else {
+                setupMessage = "Claude login refreshed. Usage updated."
+            }
+        } else if result.restartRecommended {
+            setupMessage = "\(result.message) Restart Bridge."
+        } else {
+            setupMessage = result.message
+        }
+    }
+
+    private var isClaudeRateLimited: Bool {
+        guard let warning = poller.usage.claude.warning?.lowercased() else {
+            return false
+        }
+        return warning.contains("rate-limit") || warning.contains("http 429")
     }
 
     private func setLoginItem(_ enabled: Bool) {
