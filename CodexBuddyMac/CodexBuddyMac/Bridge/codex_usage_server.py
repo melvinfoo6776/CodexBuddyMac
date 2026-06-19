@@ -356,7 +356,31 @@ def _retry_after_seconds(exc: HTTPError, default: float) -> float:
     return default
 
 
-def get_live_claude_usage() -> tuple[dict[str, Any] | None, str | None]:
+def _persist_claude_usage(path: Path, claude: dict[str, Any]) -> None:
+    """Atomically write the latest live Claude usage to disk.
+
+    Why: the disk file is the cross-restart fallback. Without this, a server
+    restart drops the in-process cache and the next 429 falls back to the
+    bundled placeholder of zeros. Persisting on every successful live fetch
+    means the fallback is always the last known live values.
+    """
+    payload = {
+        "updated_at": claude.get("updated_at"),
+        "source": claude.get("source"),
+        "claude": {key: claude[key] for key in claude if key not in ("updated_at", "source", "warning")},
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def get_live_claude_usage(claude_file: Path | None = None) -> tuple[dict[str, Any] | None, str | None]:
     """Live Claude usage with an in-process TTL cache and failure backoff.
 
     Returns (claude, warning). When a usable value is available (freshly fetched,
@@ -378,22 +402,30 @@ def get_live_claude_usage() -> tuple[dict[str, Any] | None, str | None]:
         if _claude_live_cache is not None and now - _claude_live_fetched_at < CLAUDE_LIVE_TTL_SECONDS:
             return dict(_claude_live_cache), None
 
-        # In a backoff window after a recent failure: serve last-known-good live
-        # rather than hammering the endpoint (and rather than the stale file).
-        if now < _claude_live_retry_after and _claude_live_cache is not None:
-            stale = dict(_claude_live_cache)
-            now_dt = datetime.now(timezone.utc)
-            for key in ("five_hour", "weekly", "seven_day"):
-                expire_passed_window(stale.get(key), now_dt)
+        # In a backoff window after a recent failure: do NOT call upstream again.
+        # Retrying inside the Retry-After window just renews the 429 and the limit
+        # never clears. This must hold even with no in-process cache (e.g. right
+        # after a restart) -- otherwise every timer refresh re-trips the limit.
+        if now < _claude_live_retry_after:
             eta = _format_backoff_eta(_claude_live_retry_after - now)
-            stale["warning"] = f"Live Claude usage rate-limited; showing last known live values (retry in {eta})"
-            return stale, None
+            if _claude_live_cache is not None:
+                stale = dict(_claude_live_cache)
+                now_dt = datetime.now(timezone.utc)
+                for key in ("five_hour", "weekly", "seven_day"):
+                    expire_passed_window(stale.get(key), now_dt)
+                stale["warning"] = f"Live Claude usage rate-limited; showing last known live values (retry in {eta})"
+                return stale, None
+            # No cached live value: fall back to the on-disk file (persisted
+            # last-known-good) without touching the rate-limited endpoint.
+            return None, f"Live Claude usage rate-limited; retry in {eta}"
 
         try:
             data = fetch_claude_usage(token)
             _claude_live_cache = data
             _claude_live_fetched_at = now
             _claude_live_retry_after = 0.0
+            if claude_file is not None:
+                _persist_claude_usage(claude_file, data)
             return dict(data), None
         except HTTPError as exc:
             # Honor the server's Retry-After (the OAuth usage endpoint returns a
@@ -428,7 +460,7 @@ def attach_claude_usage(payload: dict[str, Any], claude_file: Path, enabled: boo
 
     live_warning: str | None = None
     if live:
-        claude, live_warning = get_live_claude_usage()
+        claude, live_warning = get_live_claude_usage(claude_file)
         if claude is not None:
             payload["claude"] = claude
             return
