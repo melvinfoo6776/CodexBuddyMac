@@ -4,11 +4,22 @@ build/
 Dist/
 Logs/
 *.log
+.env
+.env.*
+!.env.example
+*.cer
+*.key
+*.mobileprovision
+*.p12
+*.pem
+*.provisionprofile
 *.xcuserstate
 xcuserdata/
 *.moved-aside
 *.xccheckout
 *.xcscmblueprint
+.swiftpm/
+.build/
 
 # Local notes and obsolete pre-Xcode project sources.
 /XCODE_SETUP.md

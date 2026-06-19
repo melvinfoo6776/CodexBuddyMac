@@ -1,5 +1,7 @@
 # CodexBuddyMac
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 CodexBuddyMac is a macOS menu bar app that displays Codex and Claude Code usage.
 It runs a local Python bridge, polls the providers' usage endpoints, and keeps the
 latest snapshot on the Mac.
@@ -67,6 +69,10 @@ The bridge calls provider usage endpoints using the user's existing CLI OAuth
 session. These endpoints may change because they are controlled by their
 respective providers.
 
+CodexBuddyMac is an independent, unofficial project. It is not affiliated with,
+endorsed by, or sponsored by OpenAI or Anthropic. Codex, ChatGPT, Claude, and
+Claude Code are trademarks of their respective owners.
+
 ## Troubleshooting
 
 - If Claude remains at zero, run `claude auth status` and sign in if necessary.
@@ -79,3 +85,7 @@ respective providers.
 - `CodexBuddyMac/CodexBuddyMac`: menu bar app and bundled bridge
 - `CodexBuddyMac/CodexBuddyWidgetExtension`: widget source
 - `CodexBuddyMac/CodexBuddyMac.xcodeproj`: Xcode project
+
+## License
+
+Licensed under the [MIT License](LICENSE).
