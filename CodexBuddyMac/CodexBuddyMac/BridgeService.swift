@@ -261,6 +261,46 @@ enum BridgeService {
         )
     }
 
+    /// Ask the bridge to refresh the Claude OAuth token. Returns a UI message.
+    static func refreshClaudeLogin() async -> String {
+        guard let url = URL(string: "http://127.0.0.1:8789/claude/refresh") else {
+            return "Invalid bridge URL"
+        }
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.httpMethod = "POST"
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                return (obj?["message"] as? String) ?? "Claude token refreshed"
+            }
+            return (obj?["error"] as? String) ?? "Refresh failed (HTTP \(code))"
+        } catch {
+            return "Refresh failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Human-readable Claude token status from the bridge (Valid / Expired / …).
+    static func claudeTokenStatus() async -> String {
+        guard let url = URL(string: "http://127.0.0.1:8789/claude/status") else {
+            return "Unknown"
+        }
+        do {
+            let (data, _) = try await URLSession.shared.data(for: URLRequest(url: url, timeoutInterval: 5))
+            guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                return "Unknown"
+            }
+            if let valid = obj["valid"] as? Bool, valid, let secs = obj["expires_in_seconds"] as? Int {
+                let mins = max(0, secs / 60)
+                return mins >= 60 ? "Valid (\(mins / 60)h \(mins % 60)m left)" : "Valid (\(mins)m left)"
+            }
+            return (obj["message"] as? String) ?? "Unknown"
+        } catch {
+            return "Unknown"
+        }
+    }
+
     private static func canReachBridge() async -> Bool {
         do {
             let request = URLRequest(url: bridgeURL, timeoutInterval: 1.5)
