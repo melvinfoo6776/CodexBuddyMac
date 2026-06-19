@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Secret scan & bridge tests
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pre-push secret scan
+        run: bash scripts/check-secrets.sh
+
+      - name: Python bridge tests
+        run: python3 tests/test_claude_auth_recovery.py
