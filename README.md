@@ -7,7 +7,7 @@ It runs a local Python bridge, polls the providers' usage endpoints, and keeps t
 latest snapshot on the Mac.
 
 <p align="center">
-  <img src="docs/images/codexbuddy-menu.png" width="336" alt="CodexBuddyMac menu bar popover showing Codex and Claude usage with next reset times">
+  <img src="docs/images/codexbuddy-menu.png?v=2" width="336" alt="CodexBuddyMac menu bar popover showing Codex and Claude usage with next reset times">
 </p>
 
 See both services at a glance without interrupting your workflow. The compact
