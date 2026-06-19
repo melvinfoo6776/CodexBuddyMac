@@ -17,6 +17,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bindStatusUpdates()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // Don't let the bridge outlive the app; an orphan would hold port 8789
+        // and block the next launch.
+        BridgeService.stop()
+    }
+
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = item
