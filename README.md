@@ -86,9 +86,17 @@ Open Settings from the menu to:
   or credentials file.
 - The bridge binds to `127.0.0.1` by default and is not exposed to the local
   network.
-- Usage responses are cached locally and are not uploaded by CodexBuddyMac.
+- The bridge's control endpoints (`/health`, `/claude/status`, `/claude/refresh`)
+  require a private loopback token written to a `0600` file, and login refresh is
+  rate-limited, so a stray local process or browser cannot trigger a token
+  refresh. Usage responses are cached locally and are not uploaded by CodexBuddyMac.
 - Do not commit local logs, build products, user data, credentials, or signing
-  profiles. The included `.gitignore` excludes these files.
+  profiles. The included `.gitignore` excludes these files (including the runtime
+  token, lock, PID, and retry-state files).
+- Run `./scripts/security-check.sh` for an on-demand audit (no leaked secrets or
+  PII, loopback-only bind, endpoint auth, safe file permissions, dependencies,
+  GitHub protections). `./scripts/check-secrets.sh` is a focused pre-push scan,
+  complementing GitHub's server-side secret-scanning push protection.
 
 The bridge calls provider usage endpoints using the user's existing CLI OAuth
 session. These endpoints may change because they are controlled by their
@@ -114,6 +122,8 @@ Claude Code are trademarks of their respective owners.
 - `CodexBuddyMac/CodexBuddyMac`: menu bar app and bundled bridge
 - `CodexBuddyMac/CodexBuddyWidgetExtension`: widget source
 - `CodexBuddyMac/CodexBuddyMac.xcodeproj`: Xcode project
+- `scripts/`: release build, security check, and pre-push secret scan
+- `tests/`: Python bridge tests (`python3 tests/test_claude_auth_recovery.py`)
 
 ## License
 

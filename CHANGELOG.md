@@ -28,6 +28,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   long until it expires.
 - **Bridge endpoints** `GET /claude/status` and `POST /claude/refresh` backing
   the new Settings controls.
+- **Security tooling.** `scripts/security-check.sh` (on-demand audit) and
+  `scripts/check-secrets.sh` (pre-push secret scan); GitHub secret-scanning push
+  protection enabled on the repository.
 
 ### Fixed
 
