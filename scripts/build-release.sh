@@ -7,7 +7,7 @@ developer_dir="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 derived_data="${DERIVED_DATA_DIR:-$PWD/build/ReleaseDerivedData}"
 release_dir="$PWD/Dist/Release"
 app_name="CodexBuddyMac.app"
-archive_name="CodexBuddyMac-1.1.zip"
+archive_name="CodexBuddyMac-1.1.1.zip"
 
 DEVELOPER_DIR="$developer_dir" xcodebuild \
   -project CodexBuddyMac/CodexBuddyMac.xcodeproj \
