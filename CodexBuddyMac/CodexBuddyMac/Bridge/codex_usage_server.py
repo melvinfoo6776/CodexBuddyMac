@@ -78,7 +78,7 @@ CLAUDE_RETRY_STATE_FILE = Path(__file__).with_name("bridge_state.json")
 BRIDGE_LOCK_FILE = Path(__file__).with_name(".bridge.lock")
 BRIDGE_PID_FILE = Path(__file__).with_name("bridge.pid")
 MAX_PERSISTED_RETRY_SECONDS = 24 * 60 * 60
-BRIDGE_VERSION = "1.1"
+BRIDGE_VERSION = "1.1.1"
 
 
 def load_or_create_auth_token(path: Path) -> str:
