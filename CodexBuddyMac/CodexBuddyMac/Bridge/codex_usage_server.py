@@ -48,6 +48,13 @@ CLAUDE_TOKEN_REFRESH_SKEW_SECONDS = 120.0
 CLAUDE_REFRESH_BACKOFF_SECONDS = 300.0
 _claude_refresh_lock = threading.Lock()
 _claude_refresh_retry_after: float = 0.0
+# A refresh token rejected with `invalid_grant` is permanently dead (revoked,
+# rotated away, or expired); waiting cannot revive it, so the user must sign in
+# again. Remember the dead token so we stop calling the endpoint with it and can
+# tell the UI to prompt for re-authentication until a different credential
+# appears. State self-heals once a new credential is stored.
+_claude_reauth_required = False
+_claude_dead_refresh_token: str | None = None
 
 # The /claude/refresh endpoint changes state (rotates the token, writes the
 # Keychain). Gate it behind a loopback token so a stray local process or a
@@ -409,6 +416,7 @@ def _keychain_account() -> str | None:
 
 def claude_token_status() -> dict[str, Any]:
     """Report Claude token validity for the Settings UI (no secrets returned)."""
+    global _claude_reauth_required, _claude_dead_refresh_token
     creds = _read_keychain_credentials()
     if creds is None:
         return {"present": False, "valid": False, "can_refresh": False,
@@ -417,16 +425,27 @@ def claude_token_status() -> dict[str, Any]:
     if not isinstance(oauth, dict) or not oauth.get("accessToken"):
         return {"present": False, "valid": False, "can_refresh": False,
                 "message": "No Claude access token in credential"}
+    # A newly stored credential (different refresh token) clears a prior
+    # invalid_grant, so re-auth state self-heals after `claude auth login`.
+    if (_claude_dead_refresh_token is not None
+            and oauth.get("refreshToken") != _claude_dead_refresh_token):
+        _claude_reauth_required = False
+        _claude_dead_refresh_token = None
     can_refresh = bool(oauth.get("refreshToken"))
     expires_at = oauth.get("expiresAt")
     if isinstance(expires_at, (int, float)):
         seconds = (expires_at - time.time() * 1000) / 1000
         valid = seconds > 0
+        if valid:
+            _claude_reauth_required = False
+            _claude_dead_refresh_token = None
         return {"present": True, "valid": valid, "can_refresh": can_refresh,
+                "reauth_required": _claude_reauth_required,
                 "expires_in_seconds": int(seconds),
                 "refresh_in_seconds": int(seconds - CLAUDE_TOKEN_REFRESH_SKEW_SECONDS),
                 "message": "Valid" if valid else "Expired"}
     return {"present": True, "valid": True, "can_refresh": can_refresh,
+            "reauth_required": False,
             "message": "Valid (no expiry recorded)"}
 
 
@@ -438,7 +457,7 @@ def refresh_claude_token(expected_access_token: str | None = None) -> dict[str, 
     post-write read-back doesn't verify, so a bad write can't corrupt the shared
     item (which also holds the mcpOAuth plugin tokens).
     """
-    global _claude_refresh_retry_after
+    global _claude_refresh_retry_after, _claude_reauth_required, _claude_dead_refresh_token
 
     with _claude_refresh_lock:
         now = time.monotonic()
@@ -452,6 +471,13 @@ def refresh_claude_token(expected_access_token: str | None = None) -> dict[str, 
         oauth = data.get("claudeAiOauth")
         if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
             return {"ok": False, "error": "No refresh token available"}
+        # A token already rejected with invalid_grant won't come back to life;
+        # skip the network call and ask for re-auth until a new credential is
+        # stored (detected by a different refresh token).
+        if (_claude_dead_refresh_token is not None
+                and oauth["refreshToken"] == _claude_dead_refresh_token):
+            return {"ok": False, "reauth_required": True,
+                    "error": "Claude session expired. Run `claude auth login` to sign in again."}
         if expected_access_token is not None and oauth.get("accessToken") != expected_access_token:
             return {"ok": True, "message": "Claude token already refreshed by another request",
                     "expires_in_seconds": None, "rotated_refresh_token": False}
@@ -475,12 +501,20 @@ def refresh_claude_token(expected_access_token: str | None = None) -> dict[str, 
             with urlopen(request, timeout=15, context=trusted_ssl_context()) as response:
                 token_data = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
-            _claude_refresh_retry_after = now + CLAUDE_REFRESH_BACKOFF_SECONDS
             detail = ""
             try:
                 detail = exc.read().decode("utf-8")[:200]
             except OSError:
                 pass
+            if exc.code == 400 and "invalid_grant" in detail:
+                # Refresh token is permanently dead. Don't start a transient
+                # backoff (waiting can't fix it); remember the dead token and
+                # flag re-auth so the next refresh is skipped until sign-in.
+                _claude_reauth_required = True
+                _claude_dead_refresh_token = oauth["refreshToken"]
+                return {"ok": False, "reauth_required": True,
+                        "error": "Claude session expired. Run `claude auth login` to sign in again."}
+            _claude_refresh_retry_after = now + CLAUDE_REFRESH_BACKOFF_SECONDS
             return {"ok": False, "error": f"Refresh failed: HTTP {exc.code} {detail}".strip()}
         except (URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
             _claude_refresh_retry_after = now + CLAUDE_REFRESH_BACKOFF_SECONDS
@@ -527,6 +561,8 @@ def refresh_claude_token(expected_access_token: str | None = None) -> dict[str, 
             return {"ok": False, "error": "Write verification failed; restored original credential"}
 
         _claude_refresh_retry_after = 0.0
+        _claude_reauth_required = False
+        _claude_dead_refresh_token = None
 
     return {"ok": True, "message": "Claude token refreshed",
             "expires_in_seconds": int(expires_in) if isinstance(expires_in, (int, float)) else None,
