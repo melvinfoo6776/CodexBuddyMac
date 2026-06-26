@@ -4,6 +4,20 @@ All notable changes to CodexBuddyMac are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.1] — 2026-06-26
+
+### Fixed
+
+- **Actionable message when the Claude session must be re-authenticated.** When
+  the stored Claude refresh token is permanently invalid (revoked, rotated away,
+  or expired — the OAuth endpoint returns `invalid_grant`), **Refresh Claude
+  Login** now reports *Claude session expired. Run `claude auth login` to sign in
+  again* instead of a generic "backing off after a recent failure". The bridge no
+  longer starts a five-minute retry backoff for this permanent failure and skips
+  further refresh calls against the dead token, so a fresh `claude auth login` is
+  picked up immediately. The re-auth state self-heals once a new credential is
+  stored, and `GET /claude/status` exposes a `reauth_required` flag.
+
 ## [1.1] — 2026-06-19
 
 ### Added

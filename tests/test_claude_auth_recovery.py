@@ -1,5 +1,6 @@
 import importlib.util
 import copy
+import io
 import json
 import os
 import tempfile
@@ -198,6 +199,54 @@ class ClaudeAuthRecoveryTests(unittest.TestCase):
         token = bridge.load_or_create_auth_token(token_file)
         self.assertTrue(token)
         self.assertEqual(os.stat(token_file).st_mode & 0o777, 0o600)
+
+    def test_invalid_grant_flags_reauth_and_skips_backoff(self):
+        bridge = load_bridge("bridge_invalid_grant_test")
+        credentials = {
+            "claudeAiOauth": {
+                "accessToken": "old-access",
+                "refreshToken": "dead-refresh",
+                "expiresAt": 0,
+            }
+        }
+        bridge._read_keychain_credentials = lambda: (json.dumps(credentials), credentials)
+        bridge._keychain_account = lambda: "test-account"
+        bridge.trusted_ssl_context = lambda: None
+
+        calls = []
+
+        def fail(*args, **kwargs):
+            calls.append(1)
+            body = io.BytesIO(
+                b'{"error":"invalid_grant",'
+                b'"error_description":"Refresh token not found or invalid"}'
+            )
+            raise HTTPError(bridge.CLAUDE_OAUTH_TOKEN_URL, 400, "Bad Request", Message(), body)
+
+        bridge.urlopen = fail
+
+        first = bridge.refresh_claude_token()
+        self.assertFalse(first["ok"])
+        self.assertTrue(first.get("reauth_required"))
+        # A permanent failure must not start the transient retry backoff.
+        self.assertEqual(bridge._claude_refresh_retry_after, 0.0)
+
+        # The dead token is remembered: a second attempt short-circuits without
+        # hitting the endpoint again.
+        second = bridge.refresh_claude_token()
+        self.assertTrue(second.get("reauth_required"))
+        self.assertEqual(len(calls), 1)
+
+        # Status reports re-auth required while the dead token is still stored.
+        status = bridge.claude_token_status()
+        self.assertTrue(status.get("reauth_required"))
+
+        # Storing a fresh credential clears the re-auth state.
+        credentials["claudeAiOauth"]["refreshToken"] = "new-refresh"
+        credentials["claudeAiOauth"]["expiresAt"] = (time.time() + 3600) * 1000
+        healed = bridge.claude_token_status()
+        self.assertTrue(healed["valid"])
+        self.assertFalse(healed.get("reauth_required"))
 
     def test_token_status_reports_proactive_refresh_timing(self):
         bridge = load_bridge("bridge_token_refresh_timing_test")

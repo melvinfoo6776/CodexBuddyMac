@@ -400,6 +400,16 @@ enum BridgeService {
                     restartRecommended: true
                 )
             }
+            // A permanently dead refresh token (OAuth invalid_grant) cannot be
+            // renewed by the app or a bridge restart; the user must sign in again.
+            if let reauth = obj?["reauth_required"] as? Bool, reauth {
+                return ClaudeLoginRefreshResult(
+                    succeeded: false,
+                    message: (obj?["error"] as? String)
+                        ?? "Claude session expired. Run `claude auth login` in Terminal to sign in again.",
+                    restartRecommended: false
+                )
+            }
             return ClaudeLoginRefreshResult(
                 succeeded: false,
                 message: (obj?["error"] as? String) ?? "Claude login refresh failed (HTTP \(code)).",
