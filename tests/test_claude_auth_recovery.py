@@ -29,6 +29,40 @@ def load_bridge(name: str):
 
 
 class ClaudeAuthRecoveryTests(unittest.TestCase):
+    def test_codex_weekly_primary_window_is_not_shown_as_five_hour(self):
+        bridge = load_bridge("bridge_codex_weekly_only_test")
+
+        windows = bridge.codex_windows_from_rate_limit({
+            "primary_window": {
+                "used_percent": 23,
+                "limit_window_seconds": 7 * 24 * 60 * 60,
+                "reset_at": 1_784_621_804,
+            },
+            "secondary_window": None,
+        })
+
+        self.assertEqual(windows["five_hour"]["used"], -1)
+        self.assertEqual(windows["weekly"]["used"], 23)
+
+    def test_codex_legacy_short_primary_window_is_preserved(self):
+        bridge = load_bridge("bridge_codex_two_window_test")
+
+        windows = bridge.codex_windows_from_rate_limit({
+            "primary_window": {
+                "used_percent": 12,
+                "limit_window_seconds": 5 * 60 * 60,
+                "reset_at": 1_784_621_804,
+            },
+            "secondary_window": {
+                "used_percent": 34,
+                "limit_window_seconds": 7 * 24 * 60 * 60,
+                "reset_at": 1_784_621_804,
+            },
+        })
+
+        self.assertEqual(windows["five_hour"]["used"], 12)
+        self.assertEqual(windows["weekly"]["used"], 34)
+
     def test_uses_current_claude_cli_refresh_endpoint(self):
         bridge = load_bridge("bridge_endpoint_test")
         self.assertEqual(

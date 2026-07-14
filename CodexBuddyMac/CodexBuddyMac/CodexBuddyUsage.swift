@@ -61,14 +61,30 @@ struct UsageWindow: Codable, Equatable {
         guard let resetAt, !resetAt.isEmpty else { return nil }
         return UsageDateParser.date(from: resetAt)
     }
+
+    var isAvailable: Bool {
+        used >= 0 && remaining >= 0 && limit > 0
+    }
 }
 
 extension ServiceUsage {
+    var primaryWindow: UsageWindow {
+        fiveHour.isAvailable ? fiveHour : weekly
+    }
+
+    var primaryWindowLabel: String {
+        fiveHour.isAvailable ? "5H" : "Week"
+    }
+
+    var hasAvailableWindow: Bool {
+        fiveHour.isAvailable || weekly.isAvailable
+    }
+
     var nextResetText: String? {
         let now = Date()
         let candidates: [(String, Date)] = [
-            ("5H", fiveHour.resetDate),
-            ("Week", weekly.resetDate)
+            ("5H", fiveHour.isAvailable ? fiveHour.resetDate : nil),
+            ("Week", weekly.isAvailable ? weekly.resetDate : nil)
         ].compactMap { label, date in
             guard let date, date > now else { return nil }
             return (label, date)

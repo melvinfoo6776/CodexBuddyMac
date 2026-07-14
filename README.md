@@ -7,23 +7,29 @@ It runs a local Python bridge, polls the providers' usage endpoints, and keeps t
 latest snapshot on the Mac.
 
 <p align="center">
-  <img src="docs/images/codexbuddy-menu.png?v=2" width="336" alt="CodexBuddyMac menu bar popover showing Codex and Claude usage with next reset times">
+  <img src="docs/images/codexbuddy-menu.png?v=3" width="336" alt="CodexBuddyMac menu bar popover showing Codex weekly usage and Claude usage with reset times">
 </p>
 
 See both services at a glance without interrupting your workflow. The compact
-menu shows current five-hour and weekly usage, remaining capacity, connection
-status, and one-click refresh controls.
+menu shows each provider's currently available usage windows, remaining
+capacity, connection status, and one-click refresh controls.
 
 ## Highlights
 
 - Codex and Claude Code usage in one menu bar view
-- Five-hour and weekly usage windows
+- Provider usage windows, including weekly-only Codex plans
 - Next provider usage reset time and combined capacity battery indicator
 - Local-only bridge bound to `127.0.0.1`
 - Automatic refresh with offline fallback
 - Automatic Claude OAuth token refresh (self-healing when the login expires)
 - Settings panel with bridge controls, diagnostics, and a Claude login refresh
 - Optional launch at login
+
+## Latest Release
+
+Version 1.1.2 detects Codex plans that provide a weekly-only usage window. It
+shows that live weekly usage without a misleading five-hour bar, while Claude
+continues to show its available five-hour and weekly windows.
 
 See [CHANGELOG.md](CHANGELOG.md) for recent fixes and changes.
 

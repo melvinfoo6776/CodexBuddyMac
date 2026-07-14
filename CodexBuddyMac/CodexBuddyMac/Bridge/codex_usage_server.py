@@ -299,6 +299,49 @@ def convert_window(window: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def is_five_hour_window(window: dict[str, Any] | None) -> bool:
+    """Return whether an upstream Codex window is the legacy short window.
+
+    Codex now returns a seven-day primary window for some plans, with no
+    secondary window. Older responses used a five-hour primary window and a
+    weekly secondary window. ``limit_window_seconds`` lets us distinguish
+    those two shapes instead of always calling the primary window "5H".
+    """
+    if not isinstance(window, dict):
+        return False
+    try:
+        seconds = float(window.get("limit_window_seconds"))
+    except (TypeError, ValueError):
+        # Preserve the established mapping for older responses which did not
+        # provide a duration.
+        return True
+    return 0 < seconds <= 6 * 60 * 60
+
+
+def codex_windows_from_rate_limit(rate_limit: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Normalize Codex rate limits to the app's short-window/weekly schema.
+
+    A plan with only a seven-day primary window has no 5H limit. Representing
+    that missing window as unavailable lets the Swift UI hide it while still
+    displaying the live weekly utilization.
+    """
+    limits = rate_limit if isinstance(rate_limit, dict) else {}
+    primary = limits.get("primary_window")
+    secondary = limits.get("secondary_window")
+
+    if is_five_hour_window(primary):
+        five_hour = primary
+        weekly = secondary
+    else:
+        five_hour = None
+        weekly = primary if isinstance(primary, dict) else secondary
+
+    return {
+        "five_hour": convert_window(five_hour),
+        "weekly": convert_window(weekly),
+    }
+
+
 def convert_percent_window(window: dict[str, Any] | None, reset_key: str = "reset_at") -> dict[str, Any]:
     if not isinstance(window, dict):
         return {"used": -1, "limit": 100, "remaining": -1, "reset_at": ""}
@@ -919,19 +962,14 @@ def fetch_codex_usage(auth_file: Path) -> dict[str, Any]:
 
     upstream = json.loads(raw.decode("utf-8"))
     rate_limit = upstream.get("rate_limit") or {}
-    primary = rate_limit.get("primary_window")
-    secondary = rate_limit.get("secondary_window")
     now = datetime.now(timezone.utc).isoformat()
 
     return {
         "plan": str(upstream.get("plan_type", "unknown")).title(),
         "updated_at": now,
-        "codex": {
-            "five_hour": convert_window(primary),
-            "weekly": convert_window(secondary),
-        },
+        "codex": codex_windows_from_rate_limit(rate_limit),
         "source": CODEX_USAGE_URL,
-        "note": "Live Codex OAuth usage. Values are percentages because OpenAI returns used_percent.",
+        "note": "Live Codex OAuth usage. The bridge labels the reported window from its upstream duration.",
     }
 
 

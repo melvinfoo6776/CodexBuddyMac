@@ -127,7 +127,7 @@ struct ServiceDetailView: View {
 
                 Spacer()
 
-                Text("\(usage.fiveHour.remaining) left")
+                Text(usage.hasAvailableWindow ? "\(usage.primaryWindow.remaining) left" : "Unavailable")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -144,8 +144,17 @@ struct ServiceDetailView: View {
                     .foregroundStyle(.orange)
             }
 
-            UsageBar(label: "5H", window: usage.fiveHour, tint: tint)
-            UsageBar(label: "Week", window: usage.weekly, tint: tint.opacity(0.75))
+            if usage.fiveHour.isAvailable {
+                UsageBar(label: "5H", window: usage.fiveHour, tint: tint)
+            }
+            if usage.weekly.isAvailable {
+                UsageBar(label: "Week", window: usage.weekly, tint: tint.opacity(0.75))
+            }
+            if !usage.hasAvailableWindow {
+                Text("Usage unavailable")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -248,15 +257,15 @@ struct MenuActionRow: View {
 
 extension UsagePoller {
     var menuBarStatusText: String {
-        "\(AppSettings.codexLabel.prefix(2)) \(usage.codex.fiveHour.usedPercent)%  \(AppSettings.claudeLabel.prefix(2)) \(usage.claude.fiveHour.usedPercent)%"
+        "\(AppSettings.codexLabel.prefix(2)) \(usage.codex.primaryWindow.usedPercent)%  \(AppSettings.claudeLabel.prefix(2)) \(usage.claude.primaryWindow.usedPercent)%"
     }
 
     var menuBarBatterySymbol: String {
         guard isOnline else { return "exclamationmark.circle" }
 
         let combinedUsage = max(
-            usage.codex.fiveHour.usedPercent,
-            usage.claude.fiveHour.usedPercent
+            usage.codex.primaryWindow.usedPercent,
+            usage.claude.primaryWindow.usedPercent
         )
         switch combinedUsage {
         case 0..<25:

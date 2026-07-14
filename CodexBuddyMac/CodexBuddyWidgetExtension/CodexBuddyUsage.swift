@@ -51,6 +51,24 @@ struct UsageWindow: Codable, Equatable {
         guard limit > 0 else { return 0 }
         return max(0, min(100, Int((Double(remaining) / Double(limit)) * 100.0)))
     }
+
+    var isAvailable: Bool {
+        used >= 0 && remaining >= 0 && limit > 0
+    }
+}
+
+extension ServiceUsage {
+    var primaryWindow: UsageWindow {
+        fiveHour.isAvailable ? fiveHour : weekly
+    }
+
+    var primaryWindowLabel: String {
+        fiveHour.isAvailable ? "5H" : "WK"
+    }
+
+    var hasAvailableWindow: Bool {
+        fiveHour.isAvailable || weekly.isAvailable
+    }
 }
 
 extension CodexBuddyUsage {

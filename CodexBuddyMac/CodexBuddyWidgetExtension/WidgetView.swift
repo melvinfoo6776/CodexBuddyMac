@@ -47,11 +47,11 @@ struct SmallWidgetView: View {
                 .font(.caption)
                 .fontWeight(.bold)
 
-            BigPercent(value: usage.codex.fiveHour.usedPercent, label: "5H")
+            BigPercent(value: usage.codex.primaryWindow.usedPercent, label: usage.codex.primaryWindowLabel)
 
             Divider()
 
-            Text("CLAUDE \(usage.claude.fiveHour.usedPercent)%")
+            Text("CLAUDE \(usage.claude.primaryWindow.usedPercent)%")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -69,8 +69,17 @@ struct WidgetServiceView: View {
                 .font(.caption)
                 .fontWeight(.bold)
 
-            WidgetUsageRow(label: "5H", window: usage.fiveHour)
-            WidgetUsageRow(label: "WK", window: usage.weekly)
+            if usage.fiveHour.isAvailable {
+                WidgetUsageRow(label: "5H", window: usage.fiveHour)
+            }
+            if usage.weekly.isAvailable {
+                WidgetUsageRow(label: "WK", window: usage.weekly)
+            }
+            if !usage.hasAvailableWindow {
+                Text("Unavailable")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
