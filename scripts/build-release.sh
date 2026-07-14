@@ -7,7 +7,7 @@ developer_dir="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 derived_data="${DERIVED_DATA_DIR:-$PWD/build/ReleaseDerivedData}"
 release_dir="$PWD/Dist/Release"
 app_name="CodexBuddyMac.app"
-archive_name="CodexBuddyMac-1.1.1.zip"
+archive_name="CodexBuddyMac-1.1.2.zip"
 
 DEVELOPER_DIR="$developer_dir" xcodebuild \
   -project CodexBuddyMac/CodexBuddyMac.xcodeproj \
@@ -22,6 +22,9 @@ mkdir -p "$release_dir"
 rm -rf "$release_dir/$app_name" "$release_dir/$archive_name"
 ditto "$derived_data/Build/Products/Release/$app_name" "$release_dir/$app_name"
 xattr -cr "$release_dir/$app_name"
+# Finder metadata can survive a local copy even after the generic clear above.
+# codesign rejects it, so remove it explicitly before signing the release app.
+xattr -d com.apple.FinderInfo "$release_dir/$app_name" 2>/dev/null || true
 
 # Ad-hoc signing makes the local test bundle internally verifiable. A public
 # release still requires a Developer ID Application certificate and notarization.
@@ -38,6 +41,11 @@ ditto -x -k "$release_dir/$archive_name" "$verify_dir"
 codesign --verify --deep --strict --verbose=2 "$verify_dir/$app_name"
 rm -rf "$verify_dir"
 trap - EXIT
+
+# Archive creation can restore Finder metadata on the source bundle. Remove it
+# once more so both the ZIP and the adjacent .app are valid release artifacts.
+xattr -d com.apple.FinderInfo "$release_dir/$app_name" 2>/dev/null || true
+codesign --verify --deep --strict --verbose=2 "$release_dir/$app_name"
 
 printf 'Release candidate: %s\n' "$release_dir/$app_name"
 printf 'Archive: %s\n' "$release_dir/$archive_name"

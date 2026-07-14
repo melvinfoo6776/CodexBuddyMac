@@ -4,6 +4,18 @@ All notable changes to CodexBuddyMac are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.2] — 2026-07-14
+
+### Fixed
+
+- **Weekly-only Codex usage.** Codex plans that no longer return a five-hour
+  window now show their live weekly utilization. The unavailable 5H bar is
+  hidden in the menu and widget instead of being treated as zero usage.
+
+- **Reliable local release packaging.** The release script clears Finder
+  metadata before signing and after archiving, so both the local `.app` and
+  the extracted ZIP pass macOS code-sign verification.
+
 ## [1.1.1] — 2026-06-26
 
 ### Fixed

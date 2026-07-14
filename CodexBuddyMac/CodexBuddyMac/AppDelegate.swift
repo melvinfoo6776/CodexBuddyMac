@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         button.image = NSImage(systemSymbolName: poller.menuBarBatterySymbol, accessibilityDescription: nil)
         button.title = " \(poller.menuBarStatusText)"
-        button.toolTip = "CodexBuddy 5-hour usage"
+        button.toolTip = "CodexBuddy usage"
     }
 
     @objc private func togglePopover() {
