@@ -4,6 +4,14 @@ All notable changes to CodexBuddyMac are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- **Continuous GitHub security scanning.** CodeQL now analyzes the Python
+  bridge and Swift app on pull requests, pushes to `main`, and a weekly
+  schedule. Dependabot alerts and security updates are enabled.
+
 ## [1.1.2] — 2026-07-14
 
 ### Fixed

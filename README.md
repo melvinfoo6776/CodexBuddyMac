@@ -96,6 +96,9 @@ Open Settings from the menu to:
   require a private loopback token written to a `0600` file, and login refresh is
   rate-limited, so a stray local process or browser cannot trigger a token
   refresh. Usage responses are cached locally and are not uploaded by CodexBuddyMac.
+- GitHub Secret Scanning with push protection, Dependabot alerts and security
+  updates, and CodeQL run continuously to catch exposed credentials,
+  vulnerable dependencies, and code-security issues.
 - Do not commit local logs, build products, user data, credentials, or signing
   profiles. The included `.gitignore` excludes these files (including the runtime
   token, lock, PID, and retry-state files).
