@@ -167,8 +167,7 @@ enum BridgeService {
             "--host", "127.0.0.1",
             "--port", "8789",
             "--file", fallbackUsageURL.path,
-            "--claude-file", claudeUsageURL.path,
-            "--no-discovery"
+            "--claude-file", claudeUsageURL.path
         ]
         stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
         stderrHandle = try FileHandle(forWritingTo: stderrURL)

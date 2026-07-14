@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import secrets
-import socket
 import ssl
 import subprocess
 import sys
@@ -23,8 +22,6 @@ from urllib.request import Request, urlopen
 
 
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
-DISCOVERY_REQUEST = b"CODEXBUDDY_DISCOVER_V1"
-DISCOVERY_REPLY_PREFIX = "CODEXBUDDY_USAGE_V1 "
 CLAUDE_USAGE_FILE = Path(__file__).with_name("claude_usage.json")
 
 # Live Claude usage (Pro/Max OAuth). Same metric Claude Code shows in /usage.
@@ -167,41 +164,6 @@ def persist_claude_retry_deadline(path: Path, deadline: float) -> None:
             tmp.unlink()
         except OSError:
             pass
-
-
-class DiscoveryResponder(threading.Thread):
-    def __init__(self, host: str, http_port: int, discovery_port: int, advertise_host: str | None) -> None:
-        super().__init__(daemon=True)
-        self.host = host
-        self.http_port = http_port
-        self.discovery_port = discovery_port
-        self.advertise_host = advertise_host
-
-    def run(self) -> None:
-        bind_host = self.host if self.host not in ("", "0.0.0.0", "::") else "0.0.0.0"
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((bind_host, self.discovery_port))
-            while True:
-                data, addr = sock.recvfrom(1024)
-                if data.strip() != DISCOVERY_REQUEST:
-                    continue
-
-                host = self.advertise_host or local_address_for(addr[0])
-                url = f"http://{host}:{self.http_port}/usage.json"
-                reply = (DISCOVERY_REPLY_PREFIX + url).encode("utf-8")
-                for _ in range(3):
-                    sock.sendto(reply, addr)
-                    time.sleep(0.03)
-
-
-def local_address_for(remote_host: str) -> str:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        try:
-            sock.connect((remote_host, 9))
-            return sock.getsockname()[0]
-        except OSError:
-            return socket.gethostbyname(socket.gethostname())
 
 
 def trusted_ssl_context() -> ssl.SSLContext:
@@ -1121,9 +1083,6 @@ def main() -> None:
     parser.add_argument("--manual", action="store_true", help="Only serve --file; do not call Codex live usage.")
     parser.add_argument("--no-claude", action="store_true", help="Do not attach Claude usage from --claude-file.")
     parser.add_argument("--no-live-claude", action="store_true", help="Do not call Claude OAuth usage; only attach --claude-file.")
-    parser.add_argument("--discovery-port", type=int, default=8788)
-    parser.add_argument("--advertise-host", help="Host/IP to return to discovery clients. Defaults to the LAN IP used to reach each client.")
-    parser.add_argument("--no-discovery", action="store_true", help="Disable UDP bridge discovery.")
     args = parser.parse_args()
 
     UsageHandler.usage_file = Path(args.file)
@@ -1147,13 +1106,8 @@ def main() -> None:
         bridge_lock.close()
         raise
     write_runtime_pid(BRIDGE_PID_FILE)
-    if not args.no_discovery:
-        DiscoveryResponder(args.host, args.port, args.discovery_port, args.advertise_host).start()
     mode = "manual JSON" if UsageHandler.live is False else f"live Codex OAuth via {UsageHandler.auth_file}"
     print(f"Serving {mode} at http://{args.host}:{args.port}/usage.json")
-    if not args.no_discovery:
-        advertised = args.advertise_host or "auto LAN IP"
-        print(f"Discovery on UDP {args.discovery_port}, advertising {advertised}:{args.port}")
     if UsageHandler.live:
         print(f"Falls back to {UsageHandler.usage_file} if live usage is unavailable")
     if UsageHandler.claude:
