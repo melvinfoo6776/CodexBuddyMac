@@ -65,8 +65,9 @@ done
 # --------------------------------------------------------------------------
 hdr "2. Local bridge (runtime)"
 
-if curl -fsS --max-time 4 "http://127.0.0.1:$PORT/usage.json" >/dev/null 2>&1; then
-  PASS "bridge reachable on 127.0.0.1:$PORT (GET /usage.json = 200)"
+if code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 "http://127.0.0.1:$PORT/usage.json"); then
+  [ "$code" = "403" ] && PASS "GET /usage.json without token = 403" \
+                       || FAIL "GET /usage.json without token = $code (expected 403)"
 
   # Loopback-only bind, not 0.0.0.0 / wildcard.
   binds=$(lsof -nP -iTCP:$PORT 2>/dev/null | awk '/LISTEN/{print $9}')

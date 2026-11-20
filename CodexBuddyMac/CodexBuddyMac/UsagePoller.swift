@@ -53,7 +53,7 @@ final class UsagePoller: ObservableObject {
             lastAttemptedURL = bridgeURL
 
             do {
-                let (data, response) = try await URLSession.shared.data(from: bridgeURL)
+                let (data, response) = try await BridgeService.usageData(from: bridgeURL)
                 guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
                     throw URLError(.badServerResponse)
                 }

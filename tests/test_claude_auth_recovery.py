@@ -155,19 +155,15 @@ class ClaudeAuthRecoveryTests(unittest.TestCase):
                     "expires_in": 3600,
                 }).encode()
 
-        class ProcessResult:
-            returncode = 0
-            stderr = ""
-
-        def run_process(arguments, **kwargs):
-            if "add-generic-password" in arguments:
-                state["credentials"] = json.loads(arguments[-1])
-            return ProcessResult()
+        def update_password(account, raw):
+            self.assertEqual(account, "test-account")
+            state["credentials"] = json.loads(raw)
+            return 0
 
         bridge._read_keychain_credentials = read_credentials
         bridge._keychain_account = lambda: "test-account"
         bridge.urlopen = lambda *args, **kwargs: TokenResponse()
-        bridge.subprocess.run = run_process
+        bridge._update_keychain_password = update_password
         bridge._claude_live_retry_after = 12345.0
 
         result = bridge.refresh_claude_token()
@@ -226,6 +222,25 @@ class ClaudeAuthRecoveryTests(unittest.TestCase):
         self.assertFalse(handler._authorized())
         handler.headers.replace_header(bridge.BRIDGE_AUTH_HEADER, "expected-token")
         self.assertTrue(handler._authorized())
+
+    def test_usage_routes_require_token_before_reading_usage(self):
+        bridge = load_bridge("bridge_usage_auth_test")
+        for path in ("/", "/usage.json"):
+            handler = object.__new__(bridge.UsageHandler)
+            handler.path = path
+            handler.auth_token = "expected-token"
+            handler.headers = Message()
+            responses = []
+            handler.write_json = lambda status, payload: responses.append(status)
+            handler.do_GET()
+            self.assertEqual(responses, [403])
+            handler.headers[bridge.BRIDGE_AUTH_HEADER] = "expected-token"
+            handler.live = handler.claude = handler.live_claude = False
+            handler.usage_file = SOURCE.with_name("usage.json")
+            handler.claude_file = SOURCE.with_name("claude_usage.json")
+            handler.retry_state_file = bridge.CLAUDE_RETRY_STATE_FILE
+            handler.do_GET()
+            self.assertEqual(responses, [403, 200])
 
     def test_bridge_auth_token_file_is_private(self):
         bridge = load_bridge("bridge_auth_permissions_test")
