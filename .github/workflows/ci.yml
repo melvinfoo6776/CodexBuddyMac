@@ -15,10 +15,22 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Pre-push secret scan
         run: bash scripts/check-secrets.sh
 
       - name: Python bridge tests
         run: python3 tests/test_claude_auth_recovery.py
+
+      - name: Build and verify release candidate
+        run: DEVELOPER_DIR="$(xcode-select -p)" bash scripts/build-release.sh
+
+      - name: Save verified release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate
+          path: |
+            Dist/Release/CodexBuddyMac-*.zip
+            Dist/Release/SHA256SUMS.txt
+          if-no-files-found: error

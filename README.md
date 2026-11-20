@@ -27,9 +27,9 @@ capacity, connection status, and one-click refresh controls.
 
 ## Latest Release
 
-Version 1.1.2 detects Codex plans that provide a weekly-only usage window. It
-shows that live weekly usage without a misleading five-hour bar, while Claude
-continues to show its available five-hour and weekly windows.
+Version 1.1.3 authenticates usage requests to the bundled bridge and updates
+Claude credentials through the native macOS Keychain API. The app handles
+bridge authentication automatically.
 
 See [CHANGELOG.md](CHANGELOG.md) for recent fixes and changes.
 

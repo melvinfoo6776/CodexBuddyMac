@@ -4,13 +4,22 @@ All notable changes to CodexBuddyMac are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## [1.1.3] — 2026-11-20
 
 ### Added
 
 - **Continuous GitHub security scanning.** CodeQL now analyzes the Python
   bridge and Swift app on pull requests, pushes to `main`, and a weekly
   schedule. Dependabot alerts and security updates are enabled.
+
+### Security
+
+- The bundled bridge now requires authentication for usage reads. The app
+  supplies the token automatically. Custom clients that read from the bundled
+  bridge must authenticate after updating.
+- The bridge now uses the native macOS Keychain API to save and restore
+  credentials during Claude session refresh.
+- CI and CodeQL workflows now use GitHub Actions pinned to exact commits.
 
 ## [1.1.2] — 2026-07-14
 

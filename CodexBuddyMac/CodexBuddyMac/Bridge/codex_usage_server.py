@@ -401,6 +401,33 @@ def _read_keychain_credentials() -> tuple[str, dict[str, Any]] | None:
     return raw, parsed
 
 
+def _update_keychain_password(account: str, raw: str) -> int:
+    """Update the existing generic-password item in memory, preserving its ACL."""
+    import ctypes as ct
+
+    security = ct.CDLL("/System/Library/Frameworks/Security.framework/Security")
+    core = ct.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    find = security.SecKeychainFindGenericPassword
+    find.argtypes = [ct.c_void_p, ct.c_uint32, ct.c_char_p, ct.c_uint32,
+                     ct.c_char_p, ct.c_void_p, ct.c_void_p, ct.POINTER(ct.c_void_p)]
+    modify = security.SecKeychainItemModifyAttributesAndData
+    modify.argtypes = [ct.c_void_p, ct.c_void_p, ct.c_uint32, ct.c_char_p]
+    core.CFRelease.argtypes = [ct.c_void_p]
+    core.CFRelease.restype = None
+
+    service = CLAUDE_KEYCHAIN_SERVICE.encode()
+    owner = account.encode()
+    item = ct.c_void_p()
+    status = find(None, len(service), service, len(owner), owner, None, None, ct.byref(item))
+    if status:
+        return status
+    try:
+        data = raw.encode()
+        return modify(item, None, len(data), data)
+    finally:
+        core.CFRelease(item)
+
+
 def _keychain_account() -> str | None:
     """The account (-a) the Keychain item was created with; needed to update it."""
     try:
@@ -539,30 +566,17 @@ def refresh_claude_token(expected_access_token: str | None = None) -> dict[str, 
             updated["claudeAiOauth"]["expiresAt"] = int(time.time() * 1000 + expires_in * 1000)
         new_raw = json.dumps(updated)
 
-        write = subprocess.run(
-            ["security", "add-generic-password", "-U", "-a", account,
-             "-s", CLAUDE_KEYCHAIN_SERVICE, "-w", new_raw],
-            capture_output=True, text=True, timeout=10,
-        )
-        if write.returncode != 0:
-            return {"ok": False, "error": f"Keychain write failed: {write.stderr.strip()}"}
+        status = _update_keychain_password(account, new_raw)
+        if status:
+            return {"ok": False, "error": f"Keychain write failed (OSStatus {status})"}
 
         # Verify the write: access token updated and the rest of the structure
         # (especially the mcpOAuth plugin tokens) is intact. Otherwise restore.
         check = _read_keychain_credentials()
-        original_mcp = set((data.get("mcpOAuth") or {}).keys())
-        verified = (
-            check is not None
-            and isinstance(check[1].get("claudeAiOauth"), dict)
-            and check[1]["claudeAiOauth"].get("accessToken") == new_access
-            and set((check[1].get("mcpOAuth") or {}).keys()) == original_mcp
-        )
-        if not verified:
-            subprocess.run(
-                ["security", "add-generic-password", "-U", "-a", account,
-                 "-s", CLAUDE_KEYCHAIN_SERVICE, "-w", raw],
-                capture_output=True, text=True, timeout=10,
-            )
+        if check is None or check[1] != updated:
+            status = _update_keychain_password(account, raw)
+            if status:
+                return {"ok": False, "error": f"Credential verification and rollback failed (OSStatus {status})"}
             return {"ok": False, "error": "Write verification failed; restored original credential"}
 
         _claude_refresh_retry_after = 0.0
@@ -986,6 +1000,10 @@ class UsageHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
+        if not self._authorized():
+            self.write_json(403, {"error": "Unauthorized"})
+            return
+
         try:
             status_prefix = "UPDATED"
             now = datetime.now(timezone.utc)
@@ -1037,10 +1055,10 @@ class UsageHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def _authorized(self) -> bool:
-        """Constant-time check of the loopback token. Open if none is configured."""
+        """Constant-time check of the loopback token. Reject requests when unconfigured."""
         token = self.auth_token
         if not token:
-            return True
+            return False
         provided = self.headers.get(BRIDGE_AUTH_HEADER)
         return bool(provided) and secrets.compare_digest(provided, token)
 
@@ -1092,7 +1110,7 @@ def main() -> None:
     UsageHandler.live_claude = UsageHandler.live and not args.no_live_claude
     UsageHandler.claude = not args.no_claude
     UsageHandler.retry_state_file = CLAUDE_RETRY_STATE_FILE
-    # Loopback token gating the state-changing /claude/refresh endpoint. Stored
+    # Loopback token protecting usage and control endpoints. Stored
     # next to the script (the installed Bridge dir) so the app can read it.
     UsageHandler.auth_token = load_or_create_auth_token(Path(__file__).with_name(".bridge_token"))
     bridge_lock = acquire_bridge_lock(BRIDGE_LOCK_FILE)

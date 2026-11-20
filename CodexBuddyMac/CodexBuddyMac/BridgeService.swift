@@ -266,6 +266,24 @@ enum BridgeService {
         return SHA256.hash(data: data).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
+    private final class RejectRedirects: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+
+    private static let bridgeSession = URLSession(configuration: .ephemeral, delegate: RejectRedirects(), delegateQueue: nil)
+
+    static func usageData(from url: URL) async throws -> (Data, URLResponse) {
+        guard url == bridgeURL || url.absoluteString == "http://127.0.0.1:8789/" else {
+            return try await URLSession.shared.data(from: url)
+        }
+        return try await bridgeSession.data(for: authenticatedRequest(url: url, timeout: 60))
+    }
+
     private static func authenticatedRequest(url: URL, timeout: TimeInterval) -> URLRequest {
         var request = URLRequest(url: url, timeoutInterval: timeout)
         if let token = bridgeAuthToken() {
@@ -277,7 +295,7 @@ enum BridgeService {
     private static func bridgeHealth() async -> BridgeHealth? {
         guard let url = URL(string: "http://127.0.0.1:8789/health") else { return nil }
         do {
-            let (data, response) = try await URLSession.shared.data(
+            let (data, response) = try await bridgeSession.data(
                 for: authenticatedRequest(url: url, timeout: 1.0)
             )
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
@@ -382,7 +400,7 @@ enum BridgeService {
             request.setValue(token, forHTTPHeaderField: "X-CodexBuddy-Token")
         }
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await bridgeSession.data(for: request)
             let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -440,7 +458,7 @@ enum BridgeService {
         }
         do {
             let request = authenticatedRequest(url: url, timeout: 5)
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await bridgeSession.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return unknown }
             guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
                 return unknown
